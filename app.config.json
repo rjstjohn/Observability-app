@@ -1,0 +1,20 @@
+{
+  "$schema": "./.dt-app/app.config.schema.json",
+  "environmentUrl": "https://YOUR_TENANT.apps.dynatrace.com/",
+  "app": {
+    "name": "Observability Coverage",
+    "version": "0.1.6",
+    "description": "Application observability coverage, gaps and metadata recommendations.",
+    "id": "my.observability.coverage",
+    "scopes": [
+      { "name": "storage:logs:read", "comment": "log presence + per-app log sources" },
+      { "name": "storage:metrics:read", "comment": "real metric-ingestion check" },
+      { "name": "storage:entities:read", "comment": "hosts/services/process groups/RUM/synthetic entities" },
+      { "name": "storage:events:read", "comment": "dt.system.events for monitoring-mode history" },
+      { "name": "storage:buckets:read", "comment": "Grail bucket reads" },
+      { "name": "storage:files:read", "comment": "load /lookups/leanix_data tabular file" },
+      { "name": "storage:system:read", "comment": "fetch dt.system.events (full-stack monitoring history)" },
+      { "name": "storage:filter-segments:read", "comment": "list Dynatrace Segments for the segment selector" }
+    ]
+  }
+}

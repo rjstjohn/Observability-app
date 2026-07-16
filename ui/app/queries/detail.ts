@@ -1,20 +1,28 @@
-/** Per-application drill-down queries. Each is scoped to a single appID (cheap). */
+/** Per-application drill-down queries. Each is scoped to a single appID. */
 import { sanitizeAppId } from "./common";
 
-/** Tag-adherence fieldsAdd block shared by host / service / process-group queries.
- *  Computed on the full tags array (before expand). */
-const tagFlags = `
-| fieldsAdd hasAppIDTag = if(contains(toString(tags), "AppID:"), "Yes", else: "No"),
+/**
+ * PERFORMANCE: `in("AppID:<id>", tags)` is an indexed, exact array-element match.
+ * It replaces the old `contains(toString(tags), ...)` + `expand tags` + `parse` pattern,
+ * which forced a full entity scan (154k+ process-group instances). Measured on this
+ * tenant: ~3k scanned records vs ~155k — and it is exact, so no `AppID:139410`-style
+ * substring false positives. Never reintroduce expand/parse for single-app filtering.
+ */
+const tagged = (id: string) => `| filter in("AppID:${id}", tags)`;
+
+/** Tag-adherence flags. `hasAppIDTag` is app-specific (does it carry THIS app's tag);
+ *  the rest are presence checks. All computed on the tags array — no expand. */
+const tagFlags = (id: string) => `
+| fieldsAdd hasAppIDTag = if(in("AppID:${id}", tags), "Yes", else: "No"),
             hasAppNameTag = if(contains(toString(tags), "App_Name:"), "Yes", else: "No"),
             hasBUTag = if(contains(toString(tags), "BU:"), "Yes", else: "No"),
             hasEnvTag = if(contains(toString(tags), "Environment:"), "Yes", else: "No"),
             hasLocationTag = if(contains(toString(tags), "Location:"), "Yes", else: "No")`;
 
-/** Coarse pre-filter applied right after fetch: keeps only entities whose tag string
- *  contains the AppID (a superset — the exact `appID == id` match after expand makes it
- *  precise). This collapses the expand cardinality from "all entities" to just this app's,
- *  which keeps the process-group query (tens of thousands of PGIs) well within app limits. */
-const tagPreFilter = (id: string) => `| filter contains(toString(tags), "AppID:${id}")`;
+/** Resolve a host entity id -> host name (host table is small, so this join is cheap). */
+const hostNameLookup = `
+| lookup [ fetch dt.entity.host | fields id, entity.name ],
+    sourceField: hostEntityId, lookupField: id, fields: { Host = entity.name }`;
 
 /** Full LeanIX record for one application (drives the metadata card). */
 export function leanixDetailQuery(appID: string): string {
@@ -26,38 +34,26 @@ load "/lookups/leanix_data"
 | limit 1`;
 }
 
-/** Host ids directly tagged with the app, plus hosts its tagged services/PGIs run on. */
-const appHostIds = (id: string) => `
-fetch dt.entity.host
-| filter contains(toString(tags), "AppID:${id}")
-| expand tags | parse tags, """'AppID:'LD:appID""" | fieldsAdd appID = trim(appID) | filter appID == "${id}"
-| fields hostId = id
-| append [ fetch dt.entity.service | filter contains(toString(tags), "AppID:${id}")
-          | expand tags | parse tags, """'AppID:'LD:appID""" | fieldsAdd appID = trim(appID) | filter appID == "${id}"
-          | fieldsAdd h = runs_on[dt.entity.host] | expand h | fields hostId = h ]
-| append [ fetch dt.entity.process_group_instance | filter contains(toString(tags), "AppID:${id}")
-          | expand tags | parse tags, """'AppID:'LD:appID""" | fieldsAdd appID = trim(appID) | filter appID == "${id}"
-          | fieldsAdd h = belongs_to[dt.entity.host] | fields hostId = h ]
-| filter isNotNull(hostId)
-| dedup hostId`;
-
 /**
  * Hosts for the app — directly tagged OR running one of the app's tagged services/PGIs.
- * `hasAppIDTag` is app-specific, so a host that appears via a service but isn't tagged
- * with this AppID shows the gap.
+ * All three branches use the indexed tag match; the final lookup resolves details from the
+ * (small) host table, so the whole thing stays cheap.
  */
 export function hostDetailQuery(appID: string, cutoff: number): string {
   const id = sanitizeAppId(appID);
   return `
-${appHostIds(id)}
+fetch dt.entity.host
+${tagged(id)}
+| fields hostId = id
+| append [ fetch dt.entity.service ${tagged(id)}
+          | fieldsAdd h = runs_on[dt.entity.host] | expand h | fields hostId = h ]
+| append [ fetch dt.entity.process_group_instance ${tagged(id)}
+          | fieldsAdd h = belongs_to[dt.entity.host] | fields hostId = h ]
+| filter isNotNull(hostId)
+| dedup hostId
 | lookup [ fetch dt.entity.host
            | filter lifetime[end] > now()-2h
-           | fieldsAdd tags
-           | fieldsAdd hasAppIDTag = if(contains(toString(tags), "AppID:${id}"), "Yes", else: "No"),
-                       hasAppNameTag = if(contains(toString(tags), "App_Name:"), "Yes", else: "No"),
-                       hasBUTag = if(contains(toString(tags), "BU:"), "Yes", else: "No"),
-                       hasEnvTag = if(contains(toString(tags), "Environment:"), "Yes", else: "No"),
-                       hasLocationTag = if(contains(toString(tags), "Location:"), "Yes", else: "No")
+           | fieldsAdd tags${tagFlags(id)}
            | fieldsAdd minor = toLong(splitString(installerVersion, ".")[1])
            | fieldsAdd outdatedAgent = if(isNotNull(minor) AND minor < ${cutoff}, "Yes", else: "No")
            | fields id, Host = entity.name, osType, monitoringMode, hostGroup = hostGroupName,
@@ -78,18 +74,13 @@ export function serviceDetailQuery(appID: string): string {
   const id = sanitizeAppId(appID);
   return `
 fetch dt.entity.service
-| fieldsAdd tags
-${tagPreFilter(id)}${tagFlags}
-| expand tags
-| parse tags, """'AppID:'LD:appID"""
-| fieldsAdd appID = trim(appID)
-| filter appID == "${id}"
+${tagged(id)}
+| fieldsAdd tags${tagFlags(id)}
 | fieldsAdd Upstream = arraySize(called_by[dt.entity.service]),
             Downstream = arraySize(calls[dt.entity.service]),
             hostEntityId = arrayFirst(runs_on[dt.entity.host]),
             HostCount = arraySize(runs_on[dt.entity.host])
-| lookup [ fetch dt.entity.host | fields id, entity.name ],
-    sourceField: hostEntityId, lookupField: id, fields: { Host = entity.name }
+${hostNameLookup}
 | fields Service = entity.name, id, HostId = hostEntityId, Host, HostCount, Upstream, Downstream,
          hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag
 | dedup id
@@ -98,36 +89,52 @@ ${tagPreFilter(id)}${tagFlags}
 }
 
 /**
- * Process group instances for the app — directly tagged OR run by one of the app's tagged
- * services. `hasAppIDTag` is app-specific so untagged-but-related processes show the gap.
+ * Process group instances tagged with this app — the FAST path (indexed).
+ * Covers every properly-tagged application. If it returns nothing, the app falls back to
+ * the service-derived query below.
  */
 export function processGroupInstanceDetailQuery(appID: string): string {
   const id = sanitizeAppId(appID);
   return `
 fetch dt.entity.process_group_instance
-| filter contains(toString(tags), "AppID:${id}")
-| expand tags | parse tags, """'AppID:'LD:appID""" | fieldsAdd appID = trim(appID) | filter appID == "${id}"
-| fields pgiId = id
-| append [ fetch dt.entity.service | filter contains(toString(tags), "AppID:${id}")
-          | expand tags | parse tags, """'AppID:'LD:appID""" | fieldsAdd appID = trim(appID) | filter appID == "${id}"
-          | fieldsAdd p = runs_on[dt.entity.process_group_instance] | expand p | fields pgiId = p ]
-| filter isNotNull(pgiId)
+${tagged(id)}
+| fieldsAdd tags${tagFlags(id)}
+| fieldsAdd hostEntityId = belongs_to[dt.entity.host]
+${hostNameLookup}
+| fields id, ProcessGroupInstance = entity.name, HostId = hostEntityId, Host,
+         hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag
+| dedup id
+| sort ProcessGroupInstance asc
+| limit 2000`;
+}
+
+/**
+ * FALLBACK for applications with no tagged process groups (e.g. a tagged service whose
+ * hosts/processes were never tagged). Finds the processes the app's tagged services run on.
+ *
+ * This is deliberately only used when the fast query returns zero rows: resolving details
+ * for untagged PGIs requires a full scan of the process-group table (~155k records on this
+ * tenant), which is far too slow to run on every application.
+ */
+export function processGroupInstanceViaServiceQuery(appID: string): string {
+  const id = sanitizeAppId(appID);
+  return `
+fetch dt.entity.service
+${tagged(id)}
+| fieldsAdd p = runs_on[dt.entity.process_group_instance]
+| expand p
+| filter isNotNull(p)
+| fields pgiId = p
 | dedup pgiId
 | lookup [ fetch dt.entity.process_group_instance
-           | fieldsAdd tags
-           | fieldsAdd hasAppIDTag = if(contains(toString(tags), "AppID:${id}"), "Yes", else: "No"),
-                       hasAppNameTag = if(contains(toString(tags), "App_Name:"), "Yes", else: "No"),
-                       hasBUTag = if(contains(toString(tags), "BU:"), "Yes", else: "No"),
-                       hasEnvTag = if(contains(toString(tags), "Environment:"), "Yes", else: "No"),
-                       hasLocationTag = if(contains(toString(tags), "Location:"), "Yes", else: "No")
+           | fieldsAdd tags${tagFlags(id)}
            | fieldsAdd hostEntityId = belongs_to[dt.entity.host]
            | fields id, ProcessGroupInstance = entity.name, hostEntityId,
                     hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag ],
     sourceField: pgiId, lookupField: id,
     fields: { ProcessGroupInstance, hostEntityId, hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag }
 | filter isNotNull(ProcessGroupInstance)
-| lookup [ fetch dt.entity.host | fields id, entity.name ],
-    sourceField: hostEntityId, lookupField: id, fields: { Host = entity.name }
+${hostNameLookup}
 | fields id = pgiId, ProcessGroupInstance, HostId = hostEntityId, Host,
          hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag
 | sort ProcessGroupInstance asc
@@ -194,12 +201,7 @@ export function k8sWorkloadsQuery(appID: string): string {
   const id = sanitizeAppId(appID);
   return `
 fetch dt.entity.cloud_application
-| fieldsAdd tags
-${tagPreFilter(id)}
-| expand tags
-| parse tags, """'AppID:'LD:appID"""
-| fieldsAdd appID = trim(appID)
-| filter appID == "${id}"
+${tagged(id)}
 | fieldsAdd Namespace = namespaceName, Type = arrayFirst(cloudApplicationDeploymentTypes)
 | fields Workload = entity.name, id, Namespace, Type
 | dedup id

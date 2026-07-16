@@ -17,6 +17,7 @@ import {
   hostDetailQuery,
   serviceDetailQuery,
   processGroupInstanceDetailQuery,
+  processGroupInstanceViaServiceQuery,
   logSourcesQuery,
   rumDetailQuery,
   syntheticDetailQuery,
@@ -106,11 +107,25 @@ const AppDetail = ({ appID, row }: { appID: string; row?: CoverageRow }) => {
 
   const hosts = useSegmentedDql<Record<string, unknown>>(hostDetailQuery(appID, cutoff ?? 0));
   const services = useSegmentedDql<Record<string, unknown>>(serviceDetailQuery(appID));
-  const pgs = useSegmentedDql<Record<string, unknown>>(processGroupInstanceDetailQuery(appID));
+
+  // Fast, indexed path: process groups tagged with this AppID.
+  const pgsTagged = useSegmentedDql<Record<string, unknown>>(processGroupInstanceDetailQuery(appID));
+  const taggedPgis = pgsTagged.data?.records ?? [];
+  // Only apps with NO tagged process groups fall back to the service-derived query, which
+  // has to scan the whole process-group table (~155k) and is therefore far too slow to run
+  // for every application.
+  const needsPgiFallback = !pgsTagged.isLoading && !pgsTagged.error && taggedPgis.length === 0;
+  const pgsFallback = useSegmentedDql<Record<string, unknown>>(
+    processGroupInstanceViaServiceQuery(appID),
+    undefined,
+    { enabled: needsPgiFallback }
+  );
 
   const hostRecords = hosts.data?.records ?? [];
   const serviceRecords = services.data?.records ?? [];
-  const pgRecords = pgs.data?.records ?? [];
+  const pgRecords = needsPgiFallback ? (pgsFallback.data?.records ?? []) : taggedPgis;
+  const pgsLoading = pgsTagged.isLoading || (needsPgiFallback && pgsFallback.isLoading);
+  const pgsError = pgsTagged.error ?? (needsPgiFallback ? pgsFallback.error : undefined);
   const entityRecords = [...hostRecords, ...serviceRecords, ...pgRecords];
 
   const missing = (flag: string) => entityRecords.filter((e) => e[flag] === "No").length;
@@ -259,7 +274,7 @@ const AppDetail = ({ appID, row }: { appID: string; row?: CoverageRow }) => {
           <Text textStyle="small" style={{ color: Colors.Text.Neutral.Default }}>
             Includes processes tagged with this AppID and processes run by this app&apos;s tagged services. {ADHERENCE_NOTE} Host shows which host each process runs on; AppID = ✗ means the process is untagged for this app.
           </Text>
-          <QueryState isLoading={pgs.isLoading} error={pgs.error} isEmpty={pgRecords.length === 0} emptyText="No process group instances found for this App ID.">
+          <QueryState isLoading={pgsLoading} error={pgsError} isEmpty={pgRecords.length === 0} emptyText="No process group instances found for this App ID.">
             <DataTable data={pgRecords} columns={pgiCols} sortable resizable fullWidth>
               {pgRecords.length > 25 && <DataTable.Pagination defaultPageSize={25} />}
             </DataTable>

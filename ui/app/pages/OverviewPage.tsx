@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useMemo, useState } from "react";
 import { Flex, Grid, Surface } from "@dynatrace/strato-components/layouts";
 import { Heading, Paragraph, Text } from "@dynatrace/strato-components/typography";
+import { ToggleButtonGroup } from "@dynatrace/strato-components/forms";
 import { TimeseriesChart, convertToTimeseries } from "@dynatrace/strato-components-preview/charts";
 import type { ResultRecord } from "@dynatrace-sdk/client-query";
 import { usePortfolio, useSegmentedDql } from "../hooks/usePortfolio";
@@ -56,6 +57,27 @@ export const OverviewPage = () => {
   const { rows, isLoading, error } = usePortfolio();
   const fullStack = useSegmentedDql<ResultRecord>(FULLSTACK_OVER_TIME_QUERY);
 
+  // Filters scoped to the "Signal coverage" tile only — they intentionally do not
+  // affect the KPI cards, the Full-Stack chart or the distributions below.
+  const [sigTier, setSigTier] = useState("all");
+  const [sigRevenue, setSigRevenue] = useState("all");
+
+  const tiers = useMemo(
+    () => [...new Set(rows.map((r) => r.biaIndex).filter(Boolean))].sort(),
+    [rows]
+  );
+
+  const signalRows = useMemo(
+    () =>
+      rows.filter((r) => {
+        if (sigTier !== "all" && r.biaIndex !== sigTier) return false;
+        if (sigRevenue === "yes" && r.revenueGenerating !== "Yes") return false;
+        if (sigRevenue === "no" && r.revenueGenerating !== "No") return false;
+        return true;
+      }),
+    [rows, sigTier, sigRevenue]
+  );
+
   const total = rows.length;
   const monitored = rows.filter((r) => r.Monitored === "Yes");
   const notMonitored = total - monitored.length;
@@ -107,13 +129,39 @@ export const OverviewPage = () => {
 
         <Surface>
           <Flex flexDirection="column" gap={16} padding={16}>
-            <Heading level={4}>Signal coverage across the portfolio</Heading>
+            <Flex justifyContent="space-between" alignItems="flex-end" flexFlow="wrap" gap={16}>
+              <Heading level={4}>Signal coverage across the portfolio</Heading>
+              <Flex flexFlow="wrap" gap={16} alignItems="flex-end">
+                <Flex flexDirection="column" gap={4}>
+                  <Text textStyle="small">Tier</Text>
+                  <ToggleButtonGroup value={sigTier} onChange={setSigTier}>
+                    <ToggleButtonGroup.Item value="all">All</ToggleButtonGroup.Item>
+                    {tiers.map((t) => (
+                      <ToggleButtonGroup.Item key={t} value={t}>
+                        {t}
+                      </ToggleButtonGroup.Item>
+                    ))}
+                  </ToggleButtonGroup>
+                </Flex>
+                <Flex flexDirection="column" gap={4}>
+                  <Text textStyle="small">Revenue Generating</Text>
+                  <ToggleButtonGroup value={sigRevenue} onChange={setSigRevenue}>
+                    <ToggleButtonGroup.Item value="all">All</ToggleButtonGroup.Item>
+                    <ToggleButtonGroup.Item value="yes">Yes</ToggleButtonGroup.Item>
+                    <ToggleButtonGroup.Item value="no">No</ToggleButtonGroup.Item>
+                  </ToggleButtonGroup>
+                </Flex>
+              </Flex>
+            </Flex>
+            <Text textStyle="small" style={{ color: Colors.Text.Neutral.Default }}>
+              {signalRows.length.toLocaleString()} of {total.toLocaleString()} applications
+            </Text>
             {SIGNALS.map((sig) => (
               <CoverageBar
                 key={sig}
                 label={sig}
-                covered={rows.filter((r) => r[sig] === "Yes").length}
-                total={total}
+                covered={signalRows.filter((r) => r[sig] === "Yes").length}
+                total={signalRows.length}
               />
             ))}
           </Flex>

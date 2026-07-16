@@ -3,7 +3,7 @@
   "environmentUrl": "https://YOUR_TENANT.apps.dynatrace.com/",
   "app": {
     "name": "Observability Coverage",
-    "version": "0.1.7",
+    "version": "0.1.8",
     "description": "Application observability coverage, gaps and metadata recommendations.",
     "id": "my.observability.coverage",
     "scopes": [

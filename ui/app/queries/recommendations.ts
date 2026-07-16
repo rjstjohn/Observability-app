@@ -1,4 +1,5 @@
 /** Cross-app queries for the Recommendations and Explorer tabs. */
+import { APPID_FROM_TAGS } from "./common";
 
 /** Per-tag missing-count rollup across hosts, services and process groups.
  *  Tag presence is checked without expanding (cheap — no per-tag fan-out). */
@@ -32,14 +33,11 @@ export interface AdherenceRollupRow {
   MissingLocation: number;
 }
 
-/** Orphan AppID tags: entities tagged with an AppID that is NOT in the LeanIX portfolio. */
+/** Orphan AppID tags: entities tagged with an AppID that is NOT in the LeanIX portfolio.
+ *  Uses APPID_FROM_TAGS (expands only the AppID tag) rather than expanding every tag. */
 const orphanBlock = (entity: string, label: string) => `
-    fetch ${entity}
-    | fieldsAdd tags
-    | expand tags
-    | parse tags, """'AppID:'LD:appID"""
-    | filter isNotNull(appID)
-    | fieldsAdd appID = trim(appID), EntityType = "${label}"
+    fetch ${entity}${APPID_FROM_TAGS}
+    | fieldsAdd EntityType = "${label}"
     | summarize { entities = count() }, by: {appID, EntityType}`;
 
 export const ORPHAN_TAGS_QUERY = `

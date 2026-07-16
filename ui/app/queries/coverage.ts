@@ -1,3 +1,5 @@
+import { APPID_FROM_TAGS } from "./common";
+
 /**
  * Core portfolio-coverage query.
  *
@@ -10,7 +12,9 @@
  *  - entity sub-queries scan once (0 GB) and aggregate per appID;
  *  - logs use `samplingRatio: 1000` presence instead of a 67 GB full scan;
  *  - "Metrics" is a real ingestion probe (timeseries), not a "service exists" proxy;
- *  - appIDs are trimmed on both sides (LeanIX/entity names contain stray spaces).
+ *  - appIDs are trimmed on both sides (LeanIX/entity names contain stray spaces);
+ *  - appID is extracted by expanding ONLY the AppID tag (APPID_FROM_TAGS) rather than
+ *    every tag on every entity — ~10x fewer intermediate rows across the four branches.
  *
  * Validated live: full portfolio scans ~0.09 GB.
  */
@@ -23,11 +27,7 @@ load "/lookups/leanix_data"
 | lookup [
     fetch dt.entity.host
     | filter lifetime[end] > now()-2h
-    | fieldsAdd tags
-    | expand tags
-    | parse tags, """'AppID:'LD:appID"""
-    | filter isNotNull(appID)
-    | fieldsAdd appID = trim(appID)
+    ${APPID_FROM_TAGS}
     | summarize { hasFullStack = countIf(monitoringMode == "FULL_STACK"),
                   hasInfra = countIf(monitoringMode == "INFRASTRUCTURE"),
                   Hosts = count(),
@@ -40,8 +40,7 @@ load "/lookups/leanix_data"
 | fieldsRemove hasFullStack, hasInfra
 // SERVICES (Traces)
 | lookup [
-    fetch dt.entity.service | fieldsAdd tags | expand tags | parse tags, """'AppID:'LD:appID"""
-    | filter isNotNull(appID) | fieldsAdd appID = trim(appID)
+    fetch dt.entity.service ${APPID_FROM_TAGS}
     | summarize { Services = count() }, by: {appID}
   ], sourceField: appID, lookupField: appID, fields: {Services}
 | fieldsAdd Services = coalesce(Services, 0), Traces = if(Services > 0, "Yes", else: "No")
@@ -49,14 +48,12 @@ load "/lookups/leanix_data"
 | lookup [
     timeseries cpu = avg(dt.host.cpu.usage), by:{dt.entity.host}, from: now()-2h
     | filter isNotNull(arrayLast(arrayRemoveNulls(cpu))) | fields id = dt.entity.host
-    | lookup [ fetch dt.entity.host | fieldsAdd tags | expand tags | parse tags, """'AppID:'LD:appID"""
-               | filter isNotNull(appID) | fields id, appID ], sourceField: id, lookupField: id, fields: {appID}
+    | lookup [ fetch dt.entity.host ${APPID_FROM_TAGS} | fields id, appID | dedup id ], sourceField: id, lookupField: id, fields: {appID}
     | filter isNotNull(appID)
     | append [
         timeseries req = sum(dt.service.request.count), by:{dt.entity.service}, from: now()-2h
         | filter isNotNull(arrayLast(arrayRemoveNulls(req))) | fields id = dt.entity.service
-        | lookup [ fetch dt.entity.service | fieldsAdd tags | expand tags | parse tags, """'AppID:'LD:appID"""
-                   | filter isNotNull(appID) | fields id, appID ], sourceField: id, lookupField: id, fields: {appID}
+        | lookup [ fetch dt.entity.service ${APPID_FROM_TAGS} | fields id, appID | dedup id ], sourceField: id, lookupField: id, fields: {appID}
         | filter isNotNull(appID) ]
     | fieldsAdd appID = trim(appID)
     | summarize { metricEntities = count() }, by: {appID}

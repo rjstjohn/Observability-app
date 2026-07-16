@@ -67,12 +67,21 @@ export const OverviewPage = () => {
     [rows]
   );
 
+  /** Built from the data so the buckets are exhaustive (Yes + No + N/A = All).
+   *  revenueGenerating is not boolean — ~40% of apps are "N/A". */
+  const revenueValues = useMemo(() => {
+    const order = ["Yes", "No"];
+    const rank = (v: string) => (order.indexOf(v) === -1 ? order.length : order.indexOf(v));
+    return [...new Set(rows.map((r) => r.revenueGenerating).filter(Boolean))].sort(
+      (a, b) => rank(a) - rank(b) || a.localeCompare(b)
+    );
+  }, [rows]);
+
   const signalRows = useMemo(
     () =>
       rows.filter((r) => {
         if (sigTier !== "all" && r.biaIndex !== sigTier) return false;
-        if (sigRevenue === "yes" && r.revenueGenerating !== "Yes") return false;
-        if (sigRevenue === "no" && r.revenueGenerating !== "No") return false;
+        if (sigRevenue !== "all" && r.revenueGenerating !== sigRevenue) return false;
         return true;
       }),
     [rows, sigTier, sigRevenue]
@@ -147,8 +156,11 @@ export const OverviewPage = () => {
                   <Text textStyle="small">Revenue Generating</Text>
                   <ToggleButtonGroup value={sigRevenue} onChange={setSigRevenue}>
                     <ToggleButtonGroup.Item value="all">All</ToggleButtonGroup.Item>
-                    <ToggleButtonGroup.Item value="yes">Yes</ToggleButtonGroup.Item>
-                    <ToggleButtonGroup.Item value="no">No</ToggleButtonGroup.Item>
+                    {revenueValues.map((v) => (
+                      <ToggleButtonGroup.Item key={v} value={v}>
+                        {v}
+                      </ToggleButtonGroup.Item>
+                    ))}
                   </ToggleButtonGroup>
                 </Flex>
               </Flex>

@@ -37,11 +37,11 @@ export const RecommendationsPage = () => {
     };
   }, [rollupRecords]);
 
-  /** Priority apps: Tier-1 or revenue-generating with at least one missing core signal. */
+  /** Priority apps: Tier-1 (BCC1) AND revenue-generating, with at least one missing core signal. */
   const priority = useMemo(() => {
     const core: (keyof CoverageRow)[] = ["Metrics", "Traces", "Logs"];
     return rows
-      .filter((r) => r.biaIndex === "BCC1" || r.revenueGenerating === "Yes")
+      .filter((r) => r.biaIndex === "BCC1" && r.revenueGenerating === "Yes")
       .map((r) => ({ ...r, gaps: core.filter((c) => r[c] === "No").length + (r.monitoringMode === "None" ? 1 : 0) }))
       .filter((r) => r.gaps > 0)
       .sort((a, b) => b.gaps - a.gaps || a.biaIndex.localeCompare(b.biaIndex));
@@ -95,7 +95,7 @@ export const RecommendationsPage = () => {
           </Surface>
         </QueryState>
 
-        <Heading level={4}>Priority applications (Tier-1 / revenue-generating with signal gaps)</Heading>
+        <Heading level={4}>Priority applications (Tier-1 and revenue-generating, with signal gaps)</Heading>
         <Text textStyle="small" style={{ color: Colors.Text.Neutral.Default }}>
           {priority.length.toLocaleString()} applications need attention
         </Text>

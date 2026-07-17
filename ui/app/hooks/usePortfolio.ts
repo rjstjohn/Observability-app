@@ -42,7 +42,9 @@ export function usePortfolio() {
     BACKGROUND
   );
 
-  const logsReady = !logs.isLoading && !logs.error;
+  // Ready once the log query settles (success OR error) so the UI never hangs on
+  // "loading…". On error the log set is simply empty (Logs shows "No" rather than blocking).
+  const logsReady = !logs.isLoading;
   const rows = useMemo(() => {
     const covRows = cov.data?.records ?? [];
     const logSet = new Set((logs.data?.records ?? []).map((r) => String(r.appID).trim()));

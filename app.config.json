@@ -3,9 +3,10 @@
   "environmentUrl": "https://YOUR_TENANT.apps.dynatrace.com/",
   "app": {
     "name": "Observability Coverage",
-    "version": "0.2.2",
+    "version": "0.2.3",
     "description": "Application observability coverage, gaps and metadata recommendations.",
     "id": "my.observability.coverage",
+    "icon": "ui/assets/icon.svg",
     "scopes": [
       { "name": "storage:logs:read", "comment": "log presence + per-app log sources" },
       { "name": "storage:metrics:read", "comment": "real metric-ingestion check" },

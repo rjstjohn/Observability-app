@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Observability Coverage">
+  <defs>
+    <linearGradient id="ocGrad" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8A54FF"/>
+      <stop offset="1" stop-color="#359BFF"/>
+    </linearGradient>
+  </defs>
+  <!-- coverage grid: filled square = covered, outline square = gap -->
+  <rect x="11" y="11" width="13" height="13" rx="3" fill="url(#ocGrad)"/>
+  <rect x="27" y="11" width="13" height="13" rx="3" fill="none" stroke="url(#ocGrad)" stroke-width="3"/>
+  <rect x="11" y="27" width="13" height="13" rx="3" fill="url(#ocGrad)"/>
+  <!-- magnifier inspecting coverage, with a verified check -->
+  <circle cx="42" cy="42" r="12" fill="none" stroke="#5B34C7" stroke-width="4"/>
+  <path d="M36 42 l4 4 l8 -9" fill="none" stroke="#4E9BFF" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="50.6" y1="50.6" x2="57" y2="57" stroke="#5B34C7" stroke-width="4.6" stroke-linecap="round"/>
+</svg>

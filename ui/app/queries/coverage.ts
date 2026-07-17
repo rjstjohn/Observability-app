@@ -93,7 +93,7 @@ export const LOG_PRESENCE_QUERY = `
 fetch logs, samplingRatio: 1000, from: now()-2h
 | filter isNotNull(AppID)
 | fieldsAdd appID = trim(toString(AppID))
-| summarize {}, by: {appID}
+| summarize logs = count(), by: {appID}
 | fields appID
 `;
 

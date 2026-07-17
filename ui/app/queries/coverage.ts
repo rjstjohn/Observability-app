@@ -60,13 +60,11 @@ load "/lookups/leanix_data"
   ], sourceField: appID, lookupField: appID, fields: {metricEntities}
 | fieldsAdd Metrics = if(isNotNull(metricEntities) AND metricEntities > 0, "Yes", else: "No")
 | fieldsRemove metricEntities
-// LOGS (sampled presence via the AppID log field)
-| lookup [
-    fetch logs, samplingRatio: 1000, from: now()-2h | filter isNotNull(AppID)
-    | fieldsAdd appID = trim(toString(AppID)) | summarize { logCount = count() }, by: {appID}
-  ], sourceField: appID, lookupField: appID, fields: {logCount}
-| fieldsAdd Logs = if(isNotNull(logCount) AND logCount > 0, "Yes", else: "No")
-| fieldsRemove logCount
+// NB: the Logs signal is intentionally NOT computed here. Log presence requires a ~0.27 GB
+// sampled scan (there is no index on the AppID log field). Running it inline made the whole
+// portfolio query wait on it. It is now a separate query (LOG_PRESENCE_QUERY) that runs in
+// PARALLEL and is merged in usePortfolio, so the coverage query returns as soon as the
+// (0 GB) entity work is done.
 // RUM + SYNTHETIC (entity-name "<appID> - ..." convention)
 | lookup [
     fetch dt.entity.mobile_application | parse \`entity.name\`, """LD:appID, "-""""
@@ -80,11 +78,28 @@ load "/lookups/leanix_data"
 | fieldsAdd RUM = if(isNotNull(rumApps) AND rumApps > 0, "Yes", else: "No"),
             Synthetic = if(isNotNull(synthApps) AND synthApps > 0, "Yes", else: "No")
 | fieldsRemove rumApps, synthApps
-| fieldsAdd Monitored = if(monitoringMode != "None" OR Traces == "Yes" OR Logs == "Yes"
+// Monitored here excludes Logs (merged in client-side once LOG_PRESENCE_QUERY resolves).
+| fieldsAdd Monitored = if(monitoringMode != "None" OR Traces == "Yes"
                           OR RUM == "Yes" OR Synthetic == "Yes" OR Metrics == "Yes", "Yes", else: "No")
 | sort Hosts desc
 | limit 5000
 `;
+
+/**
+ * Log presence per application (sampled 1:1000). Run in parallel with COVERAGE_QUERY and
+ * merged in usePortfolio; see the note in COVERAGE_QUERY for why it is separate.
+ */
+export const LOG_PRESENCE_QUERY = `
+fetch logs, samplingRatio: 1000, from: now()-2h
+| filter isNotNull(AppID)
+| fieldsAdd appID = trim(toString(AppID))
+| summarize {}, by: {appID}
+| fields appID
+`;
+
+export interface LogPresenceRow {
+  appID: string;
+}
 
 export type YesNo = "Yes" | "No";
 export type MonitoringMode = "Full" | "Infrastructure" | "Other" | "None";
@@ -107,7 +122,8 @@ export interface CoverageRow {
   monitoringMode: MonitoringMode;
   Metrics: YesNo;
   Traces: YesNo;
-  Logs: YesNo;
+  /** Undefined while the parallel log-presence query is still loading (renders as "—"). */
+  Logs?: YesNo;
   RUM: YesNo;
   Synthetic: YesNo;
   Monitored: YesNo;

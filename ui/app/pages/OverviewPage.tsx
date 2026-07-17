@@ -54,7 +54,7 @@ const Distribution = ({ title, data }: { title: string; data: [string, number][]
 };
 
 export const OverviewPage = () => {
-  const { rows, isLoading, error } = usePortfolio();
+  const { rows, isLoading, error, logsPending } = usePortfolio();
   const fullStack = useSegmentedDql<ResultRecord>(FULLSTACK_OVER_TIME_QUERY);
 
   // Filters scoped to the "Signal coverage" tile only — they intentionally do not
@@ -171,7 +171,7 @@ export const OverviewPage = () => {
             {SIGNALS.map((sig) => (
               <CoverageBar
                 key={sig}
-                label={sig}
+                label={sig === "Logs" && logsPending ? "Logs (loading…)" : sig}
                 covered={signalRows.filter((r) => r[sig] === "Yes").length}
                 total={signalRows.length}
               />

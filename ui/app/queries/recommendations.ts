@@ -2,15 +2,17 @@
 import { APPID_FROM_TAGS } from "./common";
 
 /** Per-tag missing-count rollup across hosts, services and process groups.
- *  Tag presence is checked without expanding (cheap — no per-tag fan-out). */
+ *  Tag presence is checked without expanding (no per-tag fan-out); toString(tags) is
+ *  computed once per record rather than once per tag check. This is scan-bound — it must
+ *  read every entity to count — so cost tracks the tenant's entity volume. */
 const adherenceBlock = (entity: string, label: string) => `
     fetch ${entity}
-    | fieldsAdd EntityType = "${label}"
-    | fieldsAdd noAppID = if(contains(toString(tags), "AppID:"), 0, else: 1),
-                noAppName = if(contains(toString(tags), "App_Name:"), 0, else: 1),
-                noBU = if(contains(toString(tags), "BU:"), 0, else: 1),
-                noEnv = if(contains(toString(tags), "Environment:"), 0, else: 1),
-                noLocation = if(contains(toString(tags), "Location:"), 0, else: 1)
+    | fieldsAdd EntityType = "${label}", tagStr = toString(tags)
+    | fieldsAdd noAppID = if(contains(tagStr, "AppID:"), 0, else: 1),
+                noAppName = if(contains(tagStr, "App_Name:"), 0, else: 1),
+                noBU = if(contains(tagStr, "BU:"), 0, else: 1),
+                noEnv = if(contains(tagStr, "Environment:"), 0, else: 1),
+                noLocation = if(contains(tagStr, "Location:"), 0, else: 1)
     | summarize { Total = count(),
                   MissingAppID = sum(noAppID),
                   MissingAppName = sum(noAppName),

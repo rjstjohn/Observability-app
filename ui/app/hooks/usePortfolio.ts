@@ -1,6 +1,7 @@
+import { useMemo } from "react";
 import { useDql } from "@dynatrace-sdk/react-hooks";
 import { useSegments } from "@dynatrace/strato-components-preview/filters";
-import { COVERAGE_QUERY, type CoverageRow } from "../queries/coverage";
+import { COVERAGE_QUERY, LOG_PRESENCE_QUERY, type CoverageRow, type LogPresenceRow } from "../queries/coverage";
 import { VERSION_CUTOFF_QUERY, type VersionCutoff } from "../queries/common";
 
 /**
@@ -31,11 +32,38 @@ export function useSegmentedDql<T = Record<string, unknown>>(
 export function usePortfolio() {
   const { segments } = useSegments();
   // The portfolio is ~1,850 apps; raise maxResultRecords above the Grail default of 1000.
-  const { data, isLoading, error, refetch } = useDql<CoverageRow>(
+  const cov = useDql<CoverageRow>(
     { query: COVERAGE_QUERY, maxResultRecords: 10000, filterSegments: segments },
     BACKGROUND
   );
-  return { rows: data?.records ?? [], isLoading, error, refetch };
+  // Runs in PARALLEL with the coverage query (the ~0.27 GB log scan is the slow part).
+  const logs = useDql<LogPresenceRow>(
+    { query: LOG_PRESENCE_QUERY, maxResultRecords: 10000, filterSegments: segments },
+    BACKGROUND
+  );
+
+  const logsReady = !logs.isLoading && !logs.error;
+  const rows = useMemo(() => {
+    const covRows = cov.data?.records ?? [];
+    const logSet = new Set((logs.data?.records ?? []).map((r) => String(r.appID).trim()));
+    return covRows.map((r) => {
+      const hasLogs = logsReady && logSet.has(r.appID);
+      // Undefined while logs are still loading -> the Logs cell/bar shows "—" then fills in.
+      const Logs: CoverageRow["Logs"] = logsReady ? (hasLogs ? "Yes" : "No") : undefined;
+      const Monitored: CoverageRow["Monitored"] = r.Monitored === "Yes" || hasLogs ? "Yes" : "No";
+      return { ...r, Logs, Monitored };
+    });
+  }, [cov.data, logs.data, logsReady]);
+
+  return {
+    rows,
+    // Render as soon as the (0 GB) coverage query is done — do NOT block on the ~0.27 GB log
+    // scan, which runs in parallel and merges in when ready.
+    isLoading: cov.isLoading,
+    error: cov.error,
+    refetch: cov.refetch,
+    logsPending: !logsReady,
+  };
 }
 
 /** OneAgent outdated-version cutoff (6th-highest distinct minor release; segment-independent). */

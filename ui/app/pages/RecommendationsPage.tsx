@@ -8,66 +8,111 @@ import { usePortfolio, useSegmentedDql, num } from "../hooks/usePortfolio";
 import { QueryState } from "../components/QueryState";
 import { StatCard } from "../components/StatCard";
 import { SignalCell } from "../components/cells";
-import { ADHERENCE_ROLLUP_QUERY, type AdherenceRollupRow } from "../queries/recommendations";
+import { buildAdherenceRollupQuery, type AdherenceRollupRow } from "../queries/recommendations";
 import { type CoverageRow } from "../queries/coverage";
-
-const rollupCols: DataTableColumnDef<AdherenceRollupRow>[] = [
-  { id: "EntityType", header: "Entity Type", accessor: "EntityType", width: 160 },
-  { id: "Total", header: "Total", accessor: (r) => num(r.Total), width: 100 },
-  { id: "MissingAppID", header: "No AppID", accessor: (r) => num(r.MissingAppID), width: 110 },
-  { id: "MissingAppName", header: "No App_Name", accessor: (r) => num(r.MissingAppName), width: 130 },
-  { id: "MissingBU", header: "No BU", accessor: (r) => num(r.MissingBU), width: 100 },
-  { id: "MissingEnvironment", header: "No Environment", accessor: (r) => num(r.MissingEnvironment), width: 140 },
-  { id: "MissingLocation", header: "No Location", accessor: (r) => num(r.MissingLocation), width: 120 },
-];
+import { useConfig } from "../config/ConfigProvider";
+import { enabledSignals, fieldsFor, str } from "../config/types";
 
 export const RecommendationsPage = () => {
+  const { config } = useConfig();
   const { rows, isLoading, error } = usePortfolio();
-  const rollup = useSegmentedDql<AdherenceRollupRow>(ADHERENCE_ROLLUP_QUERY);
+  const rollupQuery = useMemo(() => buildAdherenceRollupQuery(config), [config]);
+  const rollup = useSegmentedDql<AdherenceRollupRow>(rollupQuery);
   const rollupRecords = useMemo(() => rollup.data?.records ?? [], [rollup.data]);
 
+  const tags = config.entities.adherenceTags;
+  const signals = enabledSignals(config);
+  const priorityConds = useMemo(() => config.priority.conditions ?? [], [config.priority.conditions]);
+
+  /** Totals per tag: the app-id tag plus each configured adherence tag. */
   const totals = useMemo(() => {
-    const sum = (k: keyof AdherenceRollupRow) => rollupRecords.reduce((a, r) => a + num(r[k]), 0);
+    const sum = (k: string) => rollupRecords.reduce((a, r) => a + num(r[k]), 0);
     return {
       appId: sum("MissingAppID"),
-      appName: sum("MissingAppName"),
-      bu: sum("MissingBU"),
-      env: sum("MissingEnvironment"),
-      loc: sum("MissingLocation"),
+      byTag: tags.map((t, i) => ({ label: t.label, count: sum(`Missing${i}`) })),
     };
-  }, [rollupRecords]);
+  }, [rollupRecords, tags]);
 
-  /** Priority apps: Tier-1 (BCC1) AND revenue-generating, with at least one missing core signal. */
+  const rollupCols: DataTableColumnDef<AdherenceRollupRow>[] = useMemo(
+    () => [
+      { id: "EntityType", header: "Entity Type", accessor: "EntityType", width: 160 },
+      { id: "Total", header: "Total", accessor: (r) => num(r.Total), width: 100 },
+      {
+        id: "MissingAppID",
+        header: `No ${config.entities.tagKey}`,
+        accessor: (r) => num(r.MissingAppID),
+        width: 120,
+      },
+      ...tags.map<DataTableColumnDef<AdherenceRollupRow>>((t, i) => ({
+        id: `Missing${i}`,
+        header: `No ${t.label}`,
+        accessor: (r) => num(r[`Missing${i}`]),
+        width: 130,
+      })),
+    ],
+    [tags, config.entities.tagKey]
+  );
+
+  /** Priority applications: match every configured condition AND have a signal gap. */
   const priority = useMemo(() => {
-    const core: (keyof CoverageRow)[] = ["Metrics", "Traces", "Logs"];
+    if (!priorityConds.length) return [];
+    const core = signals.filter((s) => s === "Metrics" || s === "Traces" || s === "Logs");
     return rows
-      .filter((r) => r.biaIndex === "BCC1" && r.revenueGenerating === "Yes")
-      .map((r) => ({ ...r, gaps: core.filter((c) => r[c] === "No").length + (r.monitoringMode === "None" ? 1 : 0) }))
+      .filter((r) => priorityConds.every((c) => c.values.includes(str(r[c.field]))))
+      .map((r) => ({
+        ...r,
+        gaps: core.filter((c) => r[c] === "No").length + (r.monitoringMode === "None" ? 1 : 0),
+      }))
       .filter((r) => r.gaps > 0)
-      .sort((a, b) => b.gaps - a.gaps || a.biaIndex.localeCompare(b.biaIndex));
-  }, [rows]);
+      .sort((a, b) => b.gaps - a.gaps);
+  }, [rows, priorityConds, signals]);
 
-  const priorityCols: DataTableColumnDef<CoverageRow>[] = [
-    {
-      id: "appID",
-      header: "App ID",
-      accessor: "appID",
-      width: 90,
-      cell: ({ value }) => (
-        <Link as={RouterLink} to={`/app/${encodeURIComponent(String(value))}`}>
-          {String(value)}
-        </Link>
-      ),
-    },
-    { id: "appName", header: "Application", accessor: "appName", width: 220 },
-    { id: "biaIndex", header: "Tier", accessor: "biaIndex", width: 70 },
-    { id: "revenueGenerating", header: "Revenue", accessor: "revenueGenerating", width: 90 },
-    { id: "Metrics", header: "Metrics", accessor: "Metrics", width: 90, cell: ({ value }) => <SignalCell value={value as string} /> },
-    { id: "Traces", header: "Traces", accessor: "Traces", width: 90, cell: ({ value }) => <SignalCell value={value as string} /> },
-    { id: "Logs", header: "Logs", accessor: "Logs", width: 90, cell: ({ value }) => <SignalCell value={value as string} /> },
-    { id: "buOwnerName", header: "BU Owner", accessor: "buOwnerName", width: 170 },
-    { id: "supportRemedyGroup", header: "Support Group", accessor: "supportRemedyGroup", width: 220 },
-  ];
+  const priorityCols: DataTableColumnDef<CoverageRow>[] = useMemo(
+    () => [
+      {
+        id: "appID",
+        header: "App ID",
+        accessor: "appID",
+        width: 100,
+        cell: ({ value }) => (
+          <Link as={RouterLink} to={`/app/${encodeURIComponent(String(value))}`}>
+            {String(value)}
+          </Link>
+        ),
+      },
+      { id: "appName", header: "Application", accessor: "appName", width: 220 },
+      ...priorityConds.map<DataTableColumnDef<CoverageRow>>((c, i) => ({
+        // Key by index so two conditions on the same column can't produce a duplicate id.
+        id: `cond_${i}`,
+        header: config.fields.find((f) => f.key === c.field)?.label ?? c.field,
+        accessor: (r) => str(r[c.field]),
+        width: 120,
+      })),
+      ...signals
+        .filter((s) => s === "Metrics" || s === "Traces" || s === "Logs")
+        .map<DataTableColumnDef<CoverageRow>>((s) => ({
+          id: s,
+          header: s,
+          accessor: s,
+          width: 90,
+          cell: ({ value }) => <SignalCell value={value as string} />,
+        })),
+      ...fieldsFor(config, "table")
+        .filter((f) => !priorityConds.some((c) => c.field === f.key))
+        .slice(0, 2)
+        .map<DataTableColumnDef<CoverageRow>>((f) => ({
+          id: `cf_${f.key}`,
+          header: f.label || f.key,
+          accessor: (r) => str(r[f.key]),
+          width: 180,
+        })),
+    ],
+    [priorityConds, signals, config]
+  );
+
+  const priorityLabel = priorityConds
+    .map((c) => `${config.fields.find((f) => f.key === c.field)?.label ?? c.field} = ${c.values.join("/")}`)
+    .join(" and ");
 
   return (
     <Flex flexDirection="column" gap={24} padding={32}>
@@ -80,13 +125,25 @@ export const RecommendationsPage = () => {
 
       <QueryState isLoading={isLoading} error={error} isEmpty={rows.length === 0}>
         <Heading level={4}>Metadata tag gaps (all monitored entities)</Heading>
-        <QueryState isLoading={rollup.isLoading} error={rollup.error} isEmpty={rollupRecords.length === 0}>
+        <QueryState
+          isLoading={rollup.isLoading}
+          error={rollup.error}
+          isEmpty={rollupRecords.length === 0}
+        >
           <Flex flexFlow="wrap" gap={16}>
-            <StatCard label="Missing AppID tag" value={totals.appId.toLocaleString()} intent={totals.appId ? "critical" : "success"} />
-            <StatCard label="Missing App_Name tag" value={totals.appName.toLocaleString()} intent={totals.appName ? "warning" : "success"} />
-            <StatCard label="Missing BU tag" value={totals.bu.toLocaleString()} intent={totals.bu ? "warning" : "success"} />
-            <StatCard label="Missing Environment tag" value={totals.env.toLocaleString()} intent={totals.env ? "warning" : "success"} />
-            <StatCard label="Missing Location tag" value={totals.loc.toLocaleString()} intent={totals.loc ? "warning" : "success"} />
+            <StatCard
+              label={`Missing ${config.entities.tagKey} tag`}
+              value={totals.appId.toLocaleString()}
+              intent={totals.appId ? "critical" : "success"}
+            />
+            {totals.byTag.map((t) => (
+              <StatCard
+                key={t.label}
+                label={`Missing ${t.label} tag`}
+                value={t.count.toLocaleString()}
+                intent={t.count ? "warning" : "success"}
+              />
+            ))}
           </Flex>
           <Surface>
             <Flex padding={16}>
@@ -95,17 +152,26 @@ export const RecommendationsPage = () => {
           </Surface>
         </QueryState>
 
-        <Heading level={4}>Priority applications (Tier-1 and revenue-generating, with signal gaps)</Heading>
-        <Text textStyle="small" style={{ color: Colors.Text.Neutral.Default }}>
-          {priority.length.toLocaleString()} applications need attention
-        </Text>
-        <Surface>
-          <Flex padding={16}>
-            <DataTable data={priority} columns={priorityCols} sortable resizable fullWidth>
-              {priority.length > 25 && <DataTable.Pagination defaultPageSize={25} />}
-            </DataTable>
-          </Flex>
-        </Surface>
+        {priorityConds.length > 0 ? (
+          <>
+            <Heading level={4}>Priority applications ({priorityLabel}, with signal gaps)</Heading>
+            <Text textStyle="small" style={{ color: Colors.Text.Neutral.Default }}>
+              {priority.length.toLocaleString()} applications need attention
+            </Text>
+            <Surface>
+              <Flex padding={16}>
+                <DataTable data={priority} columns={priorityCols} sortable resizable fullWidth>
+                  {priority.length > 25 && <DataTable.Pagination defaultPageSize={25} />}
+                </DataTable>
+              </Flex>
+            </Surface>
+          </>
+        ) : (
+          <Text textStyle="small" style={{ color: Colors.Text.Neutral.Default }}>
+            No priority rule configured — set one on the Configuration tab to highlight the
+            applications that matter most.
+          </Text>
+        )}
       </QueryState>
     </Flex>
   );

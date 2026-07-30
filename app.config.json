@@ -3,7 +3,7 @@
   "environmentUrl": "https://YOUR_TENANT.apps.dynatrace.com/",
   "app": {
     "name": "Observability Coverage",
-    "version": "0.2.3",
+    "version": "1.0.0",
     "description": "Application observability coverage, gaps and metadata recommendations.",
     "id": "my.observability.coverage",
     "icon": "ui/assets/icon.svg",
@@ -13,9 +13,10 @@
       { "name": "storage:entities:read", "comment": "hosts/services/process groups/RUM/synthetic entities" },
       { "name": "storage:events:read", "comment": "dt.system.events for monitoring-mode history" },
       { "name": "storage:buckets:read", "comment": "Grail bucket reads" },
-      { "name": "storage:files:read", "comment": "load /lookups/leanix_data tabular file" },
+      { "name": "storage:files:read", "comment": "load the configured lookup table" },
       { "name": "storage:system:read", "comment": "fetch dt.system.events (full-stack monitoring history)" },
-      { "name": "storage:filter-segments:read", "comment": "list Dynatrace Segments for the segment selector" }
+      { "name": "app-settings:objects:read", "comment": "read the environment configuration" },
+      { "name": "app-settings:objects:write", "comment": "edit the environment configuration (Configuration tab)" }
     ]
   }
 }

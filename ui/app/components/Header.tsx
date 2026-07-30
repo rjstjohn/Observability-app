@@ -8,6 +8,7 @@ const NAV = [
   { to: "/app", label: "Application Detail" },
   { to: "/recommendations", label: "Recommendations" },
   { to: "/explorer", label: "Explorer" },
+  { to: "/configuration", label: "Configuration" },
 ];
 
 export const Header = () => {

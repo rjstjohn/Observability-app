@@ -1,0 +1,26 @@
+{
+  "$schema": "https://developer.dynatrace.com/docs-assets/schema_strict_apps.json",
+  "dynatrace": "1",
+  "schemaId": "coverage-config",
+  "version": "0.0.2",
+  "displayName": "Observability Coverage configuration",
+  "description": "Per-environment configuration: lookup table, field mappings, entity tag keys and signal settings. Managed from the app's Configuration tab.",
+  "multiObject": false,
+  "properties": {
+    "configJson": {
+      "displayName": "Configuration (JSON)",
+      "description": "Serialized configuration. Edit this from the app's Configuration tab rather than here.",
+      "type": "text",
+      "nullable": false,
+      "default": "{}",
+      "constraints": [
+        {
+          "type": "LENGTH",
+          "customMessage": "Configuration JSON must be at most 5000 characters (the strict-apps text maximum).",
+          "minLength": 1,
+          "maxLength": 5000
+        }
+      ]
+    }
+  }
+}

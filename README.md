@@ -1,10 +1,16 @@
 # Observability Coverage
 
 A Dynatrace App (AppEngine) that gives a **portfolio-wide view of which applications
-Dynatrace is monitoring** — and where the gaps are. It joins an application portfolio
+Dynatrace is monitoring** — and where the gaps are. It joins your application-portfolio
 lookup table to live telemetry (hosts, services, process groups, logs, metrics, RUM,
 synthetic) and reports, per application: monitoring mode, which signals are flowing, and
 metadata/tagging adherence, with per-app drill-down and prioritized recommendations.
+
+**It adapts to your environment's conventions — no code changes.** Everything that used to
+be hard-coded (the lookup path, key/name columns, which fields to surface, the entity tag
+that links entities to applications, RUM/log naming, tier and priority rules) is set from
+an in-app **Configuration** page and stored per-environment. Move a verified setup between
+tenants with JSON import/export.
 
 Built with the [Dynatrace App Toolkit](https://developer.dynatrace.com/) (React +
 TypeScript + Strato components). All data is fetched with DQL via `useDql`; the app runs
@@ -16,13 +22,11 @@ with the **signed-in user's** Grail permissions.
 
 | Tab | What it shows |
 |---|---|
-| **Overview** | KPIs (total apps, % monitored, Tier‑1 / revenue‑gen coverage), signal‑coverage bars, Full‑Stack‑over‑time chart, distributions by tier / mode / hosting. |
-| **Coverage & Health** | Filterable master table: one row per application with monitoring mode + Metrics / Traces / Logs / RUM / Synthetic, owners, support group, host/service counts. Row → detail. |
-| **Application Detail** | Per‑app metadata card, signal summary, recommendations, and drill‑down tables (Hosts → Processes → Services → Logs, then RUM, Synthetic, K8s) with tag‑adherence flags and deep links to the native apps. |
-| **Recommendations** | Portfolio‑wide metadata‑tag gaps and the highest‑priority apps (Tier‑1 / revenue‑generating) with signal gaps. |
-| **Explorer** | Applications with no detected telemetry, and orphan `AppID` tags (tagged entities not in the portfolio lookup). |
-
-A global **Segment** selector (native Dynatrace Segments) at the top filters every tab.
+| **Overview** | KPIs (total apps, % monitored, tier and priority coverage), signal-coverage bars filterable by tier/priority, Full-Stack-over-time chart, and distributions by tier / monitoring mode / a chosen field. |
+| **Coverage & Health** | Filterable master table: one row per application with monitoring mode + Metrics / Traces / Logs / RUM / Synthetic, host/service counts, and whichever lookup fields you surface. Row → detail. |
+| **Application Detail** | Per-app metadata card, signal summary, recommendations, and drill-down tables (Hosts, Process Groups, Services, Log sources, RUM, Synthetic, K8s) with tag-adherence flags and deep links to the native apps. |
+| **Recommendations** | Portfolio-wide metadata-tag gaps by entity type, and the highest-priority applications (per your priority rule) that still have monitoring gaps. |
+| **Explorer** | Applications with no detected telemetry, and orphan tags (tagged entities that don't map to any application in the lookup). |
 
 ---
 
@@ -30,41 +34,56 @@ A global **Segment** selector (native Dynatrace Segments) at the top filters eve
 
 - **Node.js ≥ 18** and npm.
 - A **Dynatrace SaaS** environment (Grail / AppEngine).
-- A **platform token** (or OAuth client) for deployment, with the scopes listed under
+- A **platform token** (or OAuth client) for deployment, with the scopes under
   [Deploying](#deploying).
-- The environment must satisfy the [data conventions](#required-environment-conventions)
-  below (or you adapt the queries — see [Customization](#customization)).
+- Two things in the environment (mapped from the Configuration page, below):
+  1. A **portfolio lookup table** — a Grail lookup / tabular file at `/lookups/<name>`
+     listing your applications, with a column that holds the application id and (optionally)
+     a display-name column and any metadata columns you want to surface.
+  2. An **entity tag** whose value is that application id (e.g. `AppID:<id>`) on the hosts,
+     services and process groups you want attributed to each application.
+
+Everything else (RUM/log naming, tier, priority, adherence tags) is optional and configured
+in-app.
 
 ---
 
-## Required environment conventions
+## Configuration (in-app)
 
-This app is **convention-driven**. Out of the box it expects the following. If your
-environment differs, see [Customization](#customization) for exactly where to change each
-one.
+On first open the app is **unconfigured** and every tab shows a "Configure this app" prompt
+that links to the **Configuration** tab. Configuration is stored as a single
+environment-scoped [App Settings](https://developer.dynatrace.com/) object shared by all
+users of the app; editing it requires the `app-settings:objects:write` permission (the page
+is read-only otherwise).
 
-1. **Portfolio lookup table** at **`/lookups/leanix_data`** (a Grail lookup / tabular
-   file), keyed by **`appID`**, with at least these fields:
-   `appID, appName, biaIndex, buOwnerName, itApplicationOwner, itPortfolioOwnerName,
-   supportRemedyGroup, revenueGenerating, businessUnit, hostingEnvironment,
-   applicationType`. The detail card also reads `fullName, appStatus,
-   securityClassification, criticalBusinessProcess, internalExternalFacing, drPlan`.
-   - `biaIndex` is treated as the **application tier** (e.g. `BCC1`, `BCC2`).
-2. **Entity tagging** — hosts, services and process‑group instances carry a
-   **`AppID:<appID>`** tag linking them to a portfolio application. Metadata‑adherence
-   checks also look for **`App_Name:`**, **`BU:`**, **`Environment:`**, **`Location:`**
-   tags.
-3. **RUM / Synthetic naming** — web/mobile application entities are named
-   **`<appID> - <name>`** (the app parses the `appID` prefix). Synthetic monitors are
-   discovered via each web application's `monitored_by[dt.entity.synthetic_test]`.
-4. **Logs** carry an **`AppID`** field (bizevent/log attribute) used for log presence and
-   the per‑source log breakdown.
+The Configuration page walks you through:
 
-> An application is considered "monitored" if it has any of: a full/infra host, a tagged
+- **Portfolio lookup table** — the lookup path and the **Application ID column**. Enter a
+  path and the app validates it live and turns the column inputs into filterable pickers of
+  the table's actual columns.
+- **Portfolio fields** — optional extra columns to surface; per field choose **Coverage
+  table** (a column on the main grid), **App detail** (a row on the per-app page), and
+  **Searchable**.
+- **Entity tagging** — the tag key that links entities to an application (its value is
+  matched against the Application ID column), and an optional list of tag keys to check for
+  metadata adherence.
+- **Signals** — turn Metrics / Traces / Logs / RUM / Synthetic on or off; disabled signals
+  vanish from the UI and the "Monitored" roll-up.
+- **RUM & Synthetic matching** — by entity-name pattern (id before a delimiter) or by tag.
+- **Logs** — the log attribute carrying the application id, plus sampling / look-back.
+- **Tier & priority** — an optional tier/criticality column and a priority rule (match one
+  or more columns against chosen values) that drives KPI cards and the Recommendations
+  "priority applications" table.
+- **Test configuration** — reads the environment and confirms the lookup resolves and the
+  tag key is in use.
+- **Import / Export** — the ⋯ menu by the page title exports the current config as JSON or
+  imports one from a file; Export is enabled once the config has been tested.
+
+> An application is "monitored" if it has any enabled signal: a full/infra host, a tagged
 > service (traces), metric ingestion, logs, a RUM app, or a synthetic monitor. Hosts and
-> processes in the detail view are the union of **directly `AppID`‑tagged** entities **and**
-> the hosts/processes the app's tagged **services** run on — so untagged-but-related
-> entities are surfaced with `AppID = ✗`.
+> processes in the detail view are the union of **directly tagged** entities **and** the
+> hosts/processes the app's tagged **services** run on — so untagged-but-related entities
+> are surfaced as an adherence gap.
 
 ---
 
@@ -84,7 +103,7 @@ The tenant URL is **not** hard-coded. `app.config.json` ships with a placeholder
 "environmentUrl": "https://YOUR_TENANT.apps.dynatrace.com/"
 ```
 
-Set it to your environment in **one** of these ways:
+Set it in **one** of these ways:
 
 - Edit `environmentUrl` in `app.config.json`, **or**
 - Pass `--environment-url https://<your-tenant>.apps.dynatrace.com` to `dt-app dev` /
@@ -92,20 +111,20 @@ Set it to your environment in **one** of these ways:
 
 ### App identity (optional)
 
-`app.config.json` → `app.id` is `my.observability.coverage` and `app.name` is
-`Observability Coverage`. **Change `app.id`** to your own reverse-domain id (e.g.
-`my.acme.obs.coverage`) for your org — the id is the app's permanent identifier in the
-environment. (Changing the id deploys a *new* app rather than updating an existing one.)
+`app.config.json` → `app.id` is `my.observability.coverage`, `app.name` is
+`Observability Coverage`. Change `app.id` to your own reverse-domain id for your org — the
+id is the app's permanent identifier in the environment. (Changing the id deploys a *new*
+app rather than updating an existing one.)
 
 ### Scopes
 
-The app requests these Grail read scopes (`app.config.json` → `app.scopes`); the signed-in
-user must also hold them via IAM policy:
+The app requests these scopes (`app.config.json` → `app.scopes`); the signed-in user must
+also hold them via IAM policy:
 
 `storage:logs:read`, `storage:metrics:read`, `storage:entities:read`,
 `storage:events:read`, `storage:buckets:read`, `storage:files:read` (the `/lookups/`
-table), `storage:system:read` (`dt.system.events`), `storage:filter-segments:read`
-(the Segment selector).
+table), `storage:system:read` (`dt.system.events`), and
+`app-settings:objects:read` / `app-settings:objects:write` (read/edit the configuration).
 
 ---
 
@@ -126,84 +145,75 @@ real data. On first run you'll be asked to consent to the app's scopes.
 
 ## Deploying
 
-Deployment needs a token with **app-install** scopes **in addition to** the read scopes
-above:
+Deployment needs a token with **app-install** scopes **in addition to** the scopes above:
 
 - `app-engine:apps:install`, `app-engine:apps:run`
-- `app-settings:objects:read` / `:write` (only if you add app settings later)
-- plus all `storage:*` scopes the app declares.
+- plus all `storage:*` and `app-settings:objects:*` scopes the app declares.
 
-Deploy non-interactively with a **platform token** via the `DT_PLATFORM_TOKEN` env var:
+Deploy non-interactively with a **platform token** via `DT_PLATFORM_TOKEN`:
 
 ```bash
-# bash
 export DT_PLATFORM_TOKEN="dt0s16.XXXX.XXXXXXXX"
 npx dt-app deploy --non-interactive --environment-url https://<your-tenant>.apps.dynatrace.com
 ```
 
 ```powershell
-# PowerShell
 $env:DT_PLATFORM_TOKEN = "dt0s16.XXXX.XXXXXXXX"
 npx dt-app deploy --non-interactive --environment-url https://<your-tenant>.apps.dynatrace.com
 ```
 
 - **Bump `app.version`** in `app.config.json` before each deploy — the platform rejects a
   re-deploy of the same version with different content.
-- Never commit the token. `.dt-app/.tokens.json` (interactive-login cache) is
-  git-ignored; keep it that way.
+- The **settings schema** (`settings/schemas/coverage-config.schema.json`) deploys with the
+  app; if you edit its constraints, bump the schema's own `version` too (settings schemas are
+  immutable per version).
+- Never commit the token. `.dt-app/.tokens.json` (interactive-login cache) is git-ignored.
 - After deploy the app is at
-  `https://<your-tenant>.apps.dynatrace.com/ui/apps/<app.id>`. Each user grants the app's
-  scopes on first open.
+  `https://<your-tenant>.apps.dynatrace.com/ui/apps/<app.id>`; each user grants the app's
+  scopes on first open, then an admin configures it once from the Configuration tab.
 
 `npm run uninstall` removes it from the target environment.
 
----
+### Deep-link target apps
 
-## Customization
-
-Adapting to a different portfolio model or org — the tenant-specific bits and where they
-live:
-
-| Change | Where |
-|---|---|
-| Lookup path / field names (`/lookups/leanix_data`, `appID`, owners, tier…) | `ui/app/queries/coverage.ts`, `ui/app/queries/detail.ts`, `ui/app/queries/common.ts` |
-| Tag keys (`AppID`, `App_Name`, `BU`, `Environment`, `Location`) | `ui/app/queries/detail.ts`, `ui/app/queries/recommendations.ts`, `ui/app/queries/common.ts` (`ADHERENCE_TAGS`) |
-| RUM / synthetic entity naming convention (`<appID> - …`) | `ui/app/queries/coverage.ts`, `ui/app/queries/detail.ts` |
-| Tier field / values (`biaIndex`, `BCC1`…) | `ui/app/queries/coverage.ts`, page filters |
-| "Outdated OneAgent" rule (default: >5 releases behind latest) | `ui/app/queries/common.ts` (`VERSION_CUTOFF_QUERY`) |
-| Deep-link URL formats to native apps | `ui/app/lib/links.ts` |
-| Deep-link **target apps** (must be installed): `dynatrace.infraops`, `dynatrace.services`, `dynatrace.logs`, `dynatrace.experience.vitals`, `dynatrace.synthetic` | `ui/app/lib/links.ts` |
+The detail tables deep-link to native Dynatrace apps, which must be installed in the
+environment: `dynatrace.infraops`, `dynatrace.services`, `dynatrace.logs`,
+`dynatrace.experience.vitals`, `dynatrace.synthetic`. Link formats live in
+`ui/app/lib/links.ts`.
 
 ---
 
 ## Performance & cost notes
 
-- Entity queries (hosts/services/PGIs) scan large record counts but consume **~0 GB**
-  (Grail entity model). The metric-ingestion probe is `timeseries`-based and effectively
-  free.
-- The portfolio-coverage query samples logs (`samplingRatio: 1000`) → the whole portfolio
-  view costs **~0.1 GB**.
-- The per-app **log-source** tile is **sampled 1:1000** (counts marked `≈`) because a full
-  scan of one app's logs can be tens of GB. Each row deep-links to the Logs app for exact
-  data.
+- Entity queries (hosts/services/PGIs) scan large record counts but consume **~0 GB** (Grail
+  entity model). The metric-ingestion probe is `timeseries`-based and effectively free.
+- Entity → application matching uses an **indexed, exact tag match** (`in("<key>:<id>",
+  tags)`), not a `contains()` + `expand` scan — ~50× fewer records processed at scale.
+- The portfolio log-presence check runs as a **separate parallel query** and samples logs
+  (`samplingRatio`, configurable) so the portfolio view renders immediately and the Logs
+  column fills in a moment later.
+- The per-app **log-source** tile is sampled (counts marked `≈`) because a full scan of one
+  app's logs can be tens of GB; each row deep-links to the Logs app for exact data.
 - Host/process names in the detail tables are resolved with a batched `lookup` join (not
-  per-row `entityName()`), which matters at scale (hundreds/thousands of entities).
+  per-row `entityName()`), which matters at scale.
 
 ---
 
 ## Project structure
 
 ```
-app.config.json          app id/name, environmentUrl (placeholder), scopes
+app.config.json                 app id/name, environmentUrl (placeholder), scopes
+settings/schemas/               App Settings v2 schema for the stored configuration
 ui/
-  main.tsx               AppRoot + SegmentsProvider + router
+  main.tsx                      AppRoot + ConfigProvider + router
   app/
-    App.tsx              Page shell, nav, global Segment selector, routes
-    components/          cells, StatCard, CoverageBar, QueryState, QueryTable, Header
-    hooks/usePortfolio   segment-aware DQL hooks (portfolio, version cutoff)
-    lib/links.ts         deep links to native Dynatrace apps
-    pages/               Overview, Coverage, AppDetail, Recommendations, Explorer
-    queries/             coverage.ts, detail.ts, recommendations.ts, common.ts
+    App.tsx                     Page shell, nav, routes
+    config/                     AppConfig model, App Settings store, ConfigProvider
+    components/                 cells, StatCard, CoverageBar, QueryState, NotConfigured, Header
+    hooks/usePortfolio.ts       config-gated DQL hooks (portfolio, version cutoff)
+    lib/links.ts                deep links to native Dynatrace apps
+    pages/                      Overview, Coverage, AppDetail, Recommendations, Explorer, Configuration
+    queries/                    coverage.ts, detail.ts, recommendations.ts, common.ts (all config-driven builders)
 ```
 
 ---

@@ -23,9 +23,10 @@ export const processLink = (id: string, name?: string) => {
   return `${base()}/ui/apps/dynatrace.infraops/explorer/Compute/Processes?perspective=Health&sort=healthIndicators%3Adescending&fullPageId=${id}${filter}`;
 };
 
-/** Service detail in the Services app (filtering the list by the app's AppID tag). */
-export const serviceLink = (id: string, appID?: string) => {
-  const filter = appID ? `#filtering=tags+%3D+%22AppID%3A${enc(appID)}%22+` : "";
+/** Service detail in the Services app, optionally filtering the list by the app's tag. */
+export const serviceLink = (id: string, appID?: string, tagKey?: string) => {
+  const filter =
+    appID && tagKey ? `#filtering=tags+%3D+%22${enc(tagKey)}%3A${enc(appID)}%22+` : "";
   return `${base()}/ui/apps/dynatrace.services/explorer/services?fullPageId=${id}&perspective=performance&sort=entity%3Aascending&detailsId=${id}&sidebarOpen=false${filter}`;
 };
 

@@ -1,108 +1,119 @@
-/** Per-application drill-down queries. Each is scoped to a single appID. */
-import { sanitizeAppId } from "./common";
+/** Per-application drill-down queries, built from the environment configuration. */
+import type { AppConfig } from "../config/types";
+import {
+  ID,
+  adherenceFieldList,
+  adherenceFlags,
+  appIdLiteral,
+  dqlField,
+  dqlStr,
+  loadLookup,
+  taggedFilter,
+} from "./common";
 
-/**
- * PERFORMANCE: `in("AppID:<id>", tags)` is an indexed, exact array-element match.
- * It replaces the old `contains(toString(tags), ...)` + `expand tags` + `parse` pattern,
- * which forced a full entity scan (154k+ process-group instances). Measured on this
- * tenant: ~3k scanned records vs ~155k — and it is exact, so no `AppID:139410`-style
- * substring false positives. Never reintroduce expand/parse for single-app filtering.
- */
-const tagged = (id: string) => `| filter in("AppID:${id}", tags)`;
-
-/** Tag-adherence flags. `hasAppIDTag` is app-specific (does it carry THIS app's tag);
- *  the rest are presence checks. All computed on the tags array — no expand. */
-const tagFlags = (id: string) => `
-| fieldsAdd hasAppIDTag = if(in("AppID:${id}", tags), "Yes", else: "No"),
-            hasAppNameTag = if(contains(toString(tags), "App_Name:"), "Yes", else: "No"),
-            hasBUTag = if(contains(toString(tags), "BU:"), "Yes", else: "No"),
-            hasEnvTag = if(contains(toString(tags), "Environment:"), "Yes", else: "No"),
-            hasLocationTag = if(contains(toString(tags), "Location:"), "Yes", else: "No")`;
-
-/** Resolve a host entity id -> host name (host table is small, so this join is cheap). */
+/** Resolve a host entity id -> host name. The host table is small, so this join is cheap
+ *  (per-row entityName() blows the query budget at a few hundred rows). */
 const hostNameLookup = `
 | lookup [ fetch dt.entity.host | fields id, entity.name ],
     sourceField: hostEntityId, lookupField: id, fields: { Host = entity.name }`;
 
-/** Full LeanIX record for one application (drives the metadata card). */
-export function leanixDetailQuery(appID: string): string {
-  const id = sanitizeAppId(appID);
+/** Matches RUM/synthetic entities for one application, per the configured mode. */
+function rumFilter(cfg: AppConfig, appId: string): string | undefined {
+  if (cfg.rum.mode === "name") {
+    const d = dqlStr(cfg.rum.delimiter || "-");
+    return `| fieldsAdd rumId = if(contains(\`entity.name\`, "${d}"), trim(splitString(\`entity.name\`, "${d}")[0]))
+| filter rumId == "${appIdLiteral(appId)}"`;
+  }
+  if (cfg.rum.mode === "tag") {
+    const key = cfg.rum.tagKey || cfg.entities.tagKey;
+    return `| filter in("${dqlStr(key)}:${appIdLiteral(appId)}", tags)`;
+  }
+  return undefined;
+}
+
+/** The full lookup row for one application (drives the metadata card).
+ *  Deliberately unprojected so every configured field is available without a query change. */
+export function lookupDetailQuery(cfg: AppConfig, appId: string): string {
   return `
-load "/lookups/leanix_data"
-| fieldsAdd appID = trim(appID)
-| filter appID == "${id}"
+${loadLookup(cfg)}
+| filter ${ID} == "${appIdLiteral(appId)}"
 | limit 1`;
 }
 
-/**
- * Hosts for the app — directly tagged OR running one of the app's tagged services/PGIs.
- * All three branches use the indexed tag match; the final lookup resolves details from the
- * (small) host table, so the whole thing stays cheap.
- */
-export function hostDetailQuery(appID: string, cutoff: number): string {
-  const id = sanitizeAppId(appID);
+/** Host ids tagged with the app, plus hosts its tagged services/processes run on. */
+function appHostIds(cfg: AppConfig, appId: string): string {
+  const t = taggedFilter(cfg, appId);
   return `
 fetch dt.entity.host
-${tagged(id)}
+${t}
 | fields hostId = id
-| append [ fetch dt.entity.service ${tagged(id)}
+| append [ fetch dt.entity.service ${t}
           | fieldsAdd h = runs_on[dt.entity.host] | expand h | fields hostId = h ]
-| append [ fetch dt.entity.process_group_instance ${tagged(id)}
+| append [ fetch dt.entity.process_group_instance ${t}
           | fieldsAdd h = belongs_to[dt.entity.host] | fields hostId = h ]
 | filter isNotNull(hostId)
-| dedup hostId
+| dedup hostId`;
+}
+
+/**
+ * Hosts for the app — directly tagged OR running one of its tagged services/processes.
+ * `hasAppIDTag` is app-specific, so a host that appears only via a service but isn't
+ * tagged shows the gap rather than being hidden.
+ */
+export function hostDetailQuery(cfg: AppConfig, appId: string, cutoff: number): string {
+  const hours = Math.max(1, Math.floor(cfg.windows.entityActivityHours ?? 2));
+  const flags = adherenceFieldList(cfg).join(", ");
+  return `
+${appHostIds(cfg, appId)}
 | lookup [ fetch dt.entity.host
-           | filter lifetime[end] > now()-2h
-           | fieldsAdd tags${tagFlags(id)}
+           | filter lifetime[end] > now()-${hours}h
+           | fieldsAdd tags
+           ${adherenceFlags(cfg, appId)}
            | fieldsAdd minor = toLong(splitString(installerVersion, ".")[1])
            | fieldsAdd outdatedAgent = if(isNotNull(minor) AND minor < ${cutoff}, "Yes", else: "No")
            | fields id, Host = entity.name, osType, monitoringMode, hostGroup = hostGroupName,
-                    installerVersion, outdatedAgent,
-                    hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag ],
+                    installerVersion, outdatedAgent, ${flags} ],
     sourceField: hostId, lookupField: id,
-    fields: { Host, osType, monitoringMode, hostGroup, installerVersion, outdatedAgent,
-              hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag }
+    fields: { Host, osType, monitoringMode, hostGroup, installerVersion, outdatedAgent, ${flags} }
 | filter isNotNull(Host)
-| fields id = hostId, Host, osType, monitoringMode, hostGroup, installerVersion, outdatedAgent,
-         hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag
+| fields id = hostId, Host, osType, monitoringMode, hostGroup, installerVersion, outdatedAgent, ${flags}
 | sort Host asc
 | limit 1000`;
 }
 
 /** Services for the app with tag adherence, host attribution and connectivity. */
-export function serviceDetailQuery(appID: string): string {
-  const id = sanitizeAppId(appID);
+export function serviceDetailQuery(cfg: AppConfig, appId: string): string {
+  const flags = adherenceFieldList(cfg).join(", ");
   return `
 fetch dt.entity.service
-${tagged(id)}
-| fieldsAdd tags${tagFlags(id)}
+${taggedFilter(cfg, appId)}
+| fieldsAdd tags
+${adherenceFlags(cfg, appId)}
 | fieldsAdd Upstream = arraySize(called_by[dt.entity.service]),
             Downstream = arraySize(calls[dt.entity.service]),
             hostEntityId = arrayFirst(runs_on[dt.entity.host]),
             HostCount = arraySize(runs_on[dt.entity.host])
 ${hostNameLookup}
-| fields Service = entity.name, id, HostId = hostEntityId, Host, HostCount, Upstream, Downstream,
-         hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag
+| fields Service = entity.name, id, HostId = hostEntityId, Host, HostCount, Upstream, Downstream, ${flags}
 | dedup id
 | sort Service asc
 | limit 1000`;
 }
 
 /**
- * Process group instances tagged with this app — the FAST path (indexed).
- * Covers every properly-tagged application. If it returns nothing, the app falls back to
- * the service-derived query below.
+ * Process instances tagged with the app — the FAST path (indexed tag match).
+ * Covers every properly tagged application; falls back below when it returns nothing.
  */
-export function processGroupInstanceDetailQuery(appID: string): string {
-  const id = sanitizeAppId(appID);
+export function processGroupInstanceDetailQuery(cfg: AppConfig, appId: string): string {
+  const flags = adherenceFieldList(cfg).join(", ");
   return `
 fetch dt.entity.process_group_instance
-${tagged(id)}
-| fieldsAdd tags${tagFlags(id)}
+${taggedFilter(cfg, appId)}
+| fieldsAdd tags
+${adherenceFlags(cfg, appId)}
 | fieldsAdd hostEntityId = belongs_to[dt.entity.host]
 ${hostNameLookup}
-| fields id, ProcessGroupInstance = entity.name, HostId = hostEntityId, Host,
-         hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag
+| fields id, ProcessGroupInstance = entity.name, HostId = hostEntityId, Host, ${flags}
 | dedup id
 | sort ProcessGroupInstance asc
 | limit 2000`;
@@ -110,45 +121,43 @@ ${hostNameLookup}
 
 /**
  * FALLBACK for applications with no tagged process groups (e.g. a tagged service whose
- * hosts/processes were never tagged). Finds the processes the app's tagged services run on.
- *
- * This is deliberately only used when the fast query returns zero rows: resolving details
- * for untagged PGIs requires a full scan of the process-group table (~155k records on this
- * tenant), which is far too slow to run on every application.
+ * processes were never tagged). Only run when the fast query returns zero rows: resolving
+ * details for untagged process instances requires a full scan of that table.
  */
-export function processGroupInstanceViaServiceQuery(appID: string): string {
-  const id = sanitizeAppId(appID);
+export function processGroupInstanceViaServiceQuery(cfg: AppConfig, appId: string): string {
+  const flags = adherenceFieldList(cfg).join(", ");
   return `
 fetch dt.entity.service
-${tagged(id)}
+${taggedFilter(cfg, appId)}
 | fieldsAdd p = runs_on[dt.entity.process_group_instance]
 | expand p
 | filter isNotNull(p)
 | fields pgiId = p
 | dedup pgiId
 | lookup [ fetch dt.entity.process_group_instance
-           | fieldsAdd tags${tagFlags(id)}
+           | fieldsAdd tags
+           ${adherenceFlags(cfg, appId)}
            | fieldsAdd hostEntityId = belongs_to[dt.entity.host]
-           | fields id, ProcessGroupInstance = entity.name, hostEntityId,
-                    hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag ],
+           | fields id, ProcessGroupInstance = entity.name, hostEntityId, ${flags} ],
     sourceField: pgiId, lookupField: id,
-    fields: { ProcessGroupInstance, hostEntityId, hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag }
+    fields: { ProcessGroupInstance, hostEntityId, ${flags} }
 | filter isNotNull(ProcessGroupInstance)
 ${hostNameLookup}
-| fields id = pgiId, ProcessGroupInstance, HostId = hostEntityId, Host,
-         hasAppIDTag, hasAppNameTag, hasBUTag, hasEnvTag, hasLocationTag
+| fields id = pgiId, ProcessGroupInstance, HostId = hostEntityId, Host, ${flags}
 | sort ProcessGroupInstance asc
 | limit 2000`;
 }
 
-/** Log volume by source + host for the app.
- *  A full scan of this app's logs is very expensive (tens of GB), so this is SAMPLED
- *  (1:1000) — counts are approximate; use the Logs-app link on each row for exact data. */
-export function logSourcesQuery(appID: string): string {
-  const id = sanitizeAppId(appID);
+/** Log volume by source + host. Sampled per config — a full scan of one app's logs is
+ *  very expensive; each row deep-links to the Logs app for exact data. */
+export function logSourcesQuery(cfg: AppConfig, appId: string): string {
+  const hours = Math.max(1, Math.floor(cfg.logs.lookbackHours ?? 2));
+  const ratio = Math.max(1, Math.floor(cfg.logs.samplingRatio ?? 1000));
+  const sampling = ratio > 1 ? `, samplingRatio: ${ratio}` : "";
+  const field = dqlField(cfg.logs.field);
   return `
-fetch logs, samplingRatio: 1000, from: now()-2h
-| filter trim(toString(AppID)) == "${id}"
+fetch logs${sampling}, from: now()-${hours}h
+| filter trim(toString(${field})) == "${appIdLiteral(appId)}"
 | summarize { Count = count(),
               Errors = countIf(loglevel == "ERROR" or status == "ERROR"),
               Warnings = countIf(loglevel == "WARN" or status == "WARN") },
@@ -157,20 +166,19 @@ fetch logs, samplingRatio: 1000, from: now()-2h
 | limit 500`;
 }
 
-/** RUM (web + mobile) applications mapped to the app via the "<appID> - ..." name. */
-export function rumDetailQuery(appID: string): string {
-  const id = sanitizeAppId(appID);
+/** RUM (web + mobile) applications for this app. */
+export function rumDetailQuery(cfg: AppConfig, appId: string): string {
+  const f = rumFilter(cfg, appId);
+  if (!f) return "";
   return `
 fetch dt.entity.mobile_application
-| parse \`entity.name\`, """LD:appID, "-""""
-| fieldsAdd appID = trim(appID), Type = "Mobile", lifetime
-| filter appID == "${id}"
+${f}
+| fieldsAdd Type = "Mobile", lifetime
 | append [
     fetch dt.entity.application
-    | parse \`entity.name\`, """LD:appID, "-""""
-    | fieldsAdd appID = trim(appID), Type = "Web", lifetime,
-                Synthetics = arraySize(monitored_by[dt.entity.synthetic_test])
-    | filter appID == "${id}" ]
+    ${f}
+    | fieldsAdd Type = "Web", lifetime,
+                Synthetics = arraySize(monitored_by[dt.entity.synthetic_test]) ]
 | fieldsAdd Active = if(lifetime[end] > now()-7d, "Yes", else: "No"),
             Synthetics = coalesce(Synthetics, 0)
 | fields Application = entity.name, id, Type, Active, Synthetics, LastSeen = lifetime[end]
@@ -178,14 +186,23 @@ fetch dt.entity.mobile_application
 | limit 500`;
 }
 
-/** Synthetic monitors (browser + http) mapped to the app's web applications. */
-export function syntheticDetailQuery(appID: string): string {
-  const id = sanitizeAppId(appID);
+/** Synthetic monitors: either via the RUM app relationship, or by their own tag. */
+export function syntheticDetailQuery(cfg: AppConfig, appId: string): string {
+  if (cfg.synthetic.mode === "tag") {
+    const key = cfg.synthetic.tagKey || cfg.entities.tagKey;
+    return `
+fetch dt.entity.synthetic_test
+| filter in("${dqlStr(key)}:${appIdLiteral(appId)}", tags)
+| fields TestName = entity.name, id
+| dedup id
+| sort TestName asc
+| limit 500`;
+  }
+  const f = rumFilter(cfg, appId);
+  if (cfg.synthetic.mode !== "viaRum" || !f) return "";
   return `
 fetch dt.entity.application
-| parse \`entity.name\`, """LD:appID, "-""""
-| fieldsAdd appID = trim(appID)
-| filter appID == "${id}"
+${f}
 | fieldsAdd dt.entity.synthetic_test = monitored_by[dt.entity.synthetic_test]
 | expand dt.entity.synthetic_test
 | filter isNotNull(dt.entity.synthetic_test)
@@ -196,12 +213,11 @@ fetch dt.entity.application
 | limit 500`;
 }
 
-/** Kubernetes workloads (cloud applications) tagged to the app. */
-export function k8sWorkloadsQuery(appID: string): string {
-  const id = sanitizeAppId(appID);
+/** Kubernetes workloads tagged to the app. */
+export function k8sWorkloadsQuery(cfg: AppConfig, appId: string): string {
   return `
 fetch dt.entity.cloud_application
-${tagged(id)}
+${taggedFilter(cfg, appId)}
 | fieldsAdd Namespace = namespaceName, Type = arrayFirst(cloudApplicationDeploymentTypes)
 | fields Workload = entity.name, id, Namespace, Type
 | dedup id

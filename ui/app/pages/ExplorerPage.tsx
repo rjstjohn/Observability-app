@@ -7,38 +7,47 @@ import Colors from "@dynatrace/strato-design-tokens/colors";
 import { usePortfolio, useSegmentedDql, num } from "../hooks/usePortfolio";
 import { QueryState } from "../components/QueryState";
 import { StatCard } from "../components/StatCard";
-import { ORPHAN_TAGS_QUERY, type OrphanTagRow } from "../queries/recommendations";
+import { buildOrphanTagsQuery, type OrphanTagRow } from "../queries/recommendations";
 import { type CoverageRow } from "../queries/coverage";
+import { useConfig } from "../config/ConfigProvider";
+import { fieldsFor, str } from "../config/types";
 
 export const ExplorerPage = () => {
+  const { config } = useConfig();
   const { rows, isLoading, error } = usePortfolio();
-  const orphans = useSegmentedDql<OrphanTagRow>(ORPHAN_TAGS_QUERY);
-  const orphanRecords = orphans.data?.records ?? [];
+  const orphanQuery = useMemo(() => buildOrphanTagsQuery(config), [config]);
+  const orphans = useSegmentedDql<OrphanTagRow>(orphanQuery);
+  const orphanRecords = useMemo(() => orphans.data?.records ?? [], [orphans.data]);
 
   const notMonitored = useMemo(() => rows.filter((r) => r.Monitored === "No"), [rows]);
+  const tableFields = useMemo(() => fieldsFor(config, "table").slice(0, 4), [config]);
 
-  const unmonCols: DataTableColumnDef<CoverageRow>[] = [
-    {
-      id: "appID",
-      header: "App ID",
-      accessor: "appID",
-      width: 90,
-      cell: ({ value }) => (
-        <Link as={RouterLink} to={`/app/${encodeURIComponent(String(value))}`}>
-          {String(value)}
-        </Link>
-      ),
-    },
-    { id: "appName", header: "Application", accessor: "appName", width: 240 },
-    { id: "biaIndex", header: "Tier", accessor: "biaIndex", width: 70 },
-    { id: "revenueGenerating", header: "Revenue", accessor: "revenueGenerating", width: 90 },
-    { id: "businessUnit", header: "Business Unit", accessor: "businessUnit", width: 240 },
-    { id: "buOwnerName", header: "BU Owner", accessor: "buOwnerName", width: 170 },
-    { id: "hostingEnvironment", header: "Hosting", accessor: "hostingEnvironment", width: 140 },
-  ];
+  const unmonCols: DataTableColumnDef<CoverageRow>[] = useMemo(
+    () => [
+      {
+        id: "appID",
+        header: "App ID",
+        accessor: "appID",
+        width: 100,
+        cell: ({ value }) => (
+          <Link as={RouterLink} to={`/app/${encodeURIComponent(String(value))}`}>
+            {String(value)}
+          </Link>
+        ),
+      },
+      { id: "appName", header: "Application", accessor: "appName", width: 240 },
+      ...tableFields.map<DataTableColumnDef<CoverageRow>>((f) => ({
+        id: `cf_${f.key}`,
+        header: f.label || f.key,
+        accessor: (r) => str(r[f.key]),
+        width: 180,
+      })),
+    ],
+    [tableFields]
+  );
 
   const orphanCols: DataTableColumnDef<OrphanTagRow>[] = [
-    { id: "appID", header: "Tagged App ID", accessor: "appID", width: 140 },
+    { id: "appID", header: "Tagged App ID", accessor: "appID", width: 150 },
     { id: "entities", header: "Entities", accessor: (r) => num(r.entities), width: 110 },
     {
       id: "entityTypes",
@@ -53,7 +62,8 @@ export const ExplorerPage = () => {
       <Flex flexDirection="column" gap={4}>
         <Heading>Explorer — Gaps &amp; Orphans</Heading>
         <Paragraph style={{ color: Colors.Text.Neutral.Default }}>
-          Applications with no detected telemetry, and AppID-tagged entities that don't match any LeanIX application.
+          Applications with no detected telemetry, and tagged entities that don&apos;t match any
+          application in your portfolio.
         </Paragraph>
       </Flex>
 
@@ -66,14 +76,14 @@ export const ExplorerPage = () => {
             intent={notMonitored.length ? "critical" : "success"}
           />
           <StatCard
-            label="Orphan AppID tags"
+            label={`Orphan ${config.entities.tagKey} tags`}
             value={orphans.isLoading ? "…" : orphanRecords.length.toLocaleString()}
-            hint="tagged but not in LeanIX"
+            hint="tagged but not in the portfolio"
             intent={orphanRecords.length ? "warning" : "success"}
           />
         </Flex>
 
-        <Heading level={4}>Not monitored — no metrics, traces, logs, RUM or synthetic detected</Heading>
+        <Heading level={4}>Not monitored — no signals detected</Heading>
         <Surface>
           <Flex padding={16}>
             <DataTable data={notMonitored} columns={unmonCols} sortable resizable fullWidth>
@@ -82,13 +92,19 @@ export const ExplorerPage = () => {
           </Flex>
         </Surface>
 
-        <Heading level={4}>Orphan AppID tags — data-quality follow-up</Heading>
+        <Heading level={4}>Orphan {config.entities.tagKey} tags — data-quality follow-up</Heading>
         <Text textStyle="small" style={{ color: Colors.Text.Neutral.Default }}>
-          These AppID values are tagged on entities but missing from leanix_data (typos, retired apps, or new apps not yet onboarded).
+          These values are tagged on entities but missing from the configured lookup table (typos,
+          retired applications, or applications not yet onboarded).
         </Text>
         <Surface>
           <Flex padding={16}>
-            <QueryState isLoading={orphans.isLoading} error={orphans.error} isEmpty={orphanRecords.length === 0} emptyText="No orphan AppID tags — every tagged entity maps to a known application.">
+            <QueryState
+              isLoading={orphans.isLoading}
+              error={orphans.error}
+              isEmpty={orphanRecords.length === 0}
+              emptyText="No orphan tags — every tagged entity maps to a known application."
+            >
               <DataTable data={orphanRecords} columns={orphanCols} sortable resizable fullWidth>
                 {orphanRecords.length > 50 && <DataTable.Pagination defaultPageSize={50} />}
               </DataTable>

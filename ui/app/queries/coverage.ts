@@ -1,134 +1,179 @@
-import { APPID_FROM_TAGS } from "./common";
-
 /**
- * Core portfolio-coverage query.
+ * Core portfolio-coverage query, built from the environment configuration.
  *
- * Reads the LeanIX application portfolio (`/lookups/leanix_data`) and left-joins each
- * observability signal aggregated per appID. Returns ONE row per LeanIX application
- * (monitored or not) so a single query powers the Overview, Coverage, Recommendations
- * and Explorer tabs (filtered client-side).
+ * Reads the configured lookup table and left-joins each observability signal aggregated
+ * per application id. Returns ONE row per application (monitored or not), so a single
+ * query powers the Overview, Coverage, Recommendations and Explorer tabs.
  *
- * Optimizations vs. the source dashboards:
- *  - entity sub-queries scan once (0 GB) and aggregate per appID;
- *  - logs use `samplingRatio: 1000` presence instead of a 67 GB full scan;
- *  - "Metrics" is a real ingestion probe (timeseries), not a "service exists" proxy;
- *  - appIDs are trimmed on both sides (LeanIX/entity names contain stray spaces);
- *  - appID is extracted by expanding ONLY the AppID tag (APPID_FROM_TAGS) rather than
- *    every tag on every entity — ~10x fewer intermediate rows across the four branches.
- *
- * Validated live: full portfolio scans ~0.09 GB.
+ * Performance notes that must be preserved:
+ *  - entity sub-queries extract the id by expanding ONLY the configured tag (appIdFromTags);
+ *  - the log-presence check is NOT here — it is a separate parallel query (see below),
+ *    because it is the only non-0 GB part and would otherwise block the whole portfolio;
+ *  - ids are trimmed on both sides (lookup values and tag values carry stray spaces).
  */
-export const COVERAGE_QUERY = `
-load "/lookups/leanix_data"
-| fieldsAdd appID = trim(appID)
-| fields appID, appName, biaIndex, buOwnerName, itApplicationOwner, itPortfolioOwnerName,
-         supportRemedyGroup, revenueGenerating, businessUnit, hostingEnvironment, applicationType
-// HOSTS + monitoringMode
+import type { AppConfig } from "../config/types";
+import { ID, appIdFromTags, dqlField, dqlStr, loadLookup, lookupProjection } from "./common";
+
+/** RUM/synthetic id extraction, per the configured matching mode. */
+function rumIdExtraction(cfg: AppConfig): string | undefined {
+  if (cfg.rum.mode === "name") {
+    // First token before the delimiter, trimmed. Replaces the old `LD:` (leading-digits)
+    // parse, which silently failed for non-numeric application ids.
+    const d = dqlStr(cfg.rum.delimiter || "-");
+    return `| fieldsAdd ${ID} = if(contains(\`entity.name\`, "${d}"), trim(splitString(\`entity.name\`, "${d}")[0]))
+| filter isNotNull(${ID})`;
+  }
+  if (cfg.rum.mode === "tag") {
+    const key = dqlStr(cfg.rum.tagKey || cfg.entities.tagKey);
+    return `
+| fieldsAdd appIdTags = arrayRemoveNulls(iCollectArray(if(matchesValue(tags[], "${key}:*"), tags[])))
+| expand appIdTags
+| fieldsAdd ${ID} = trim(splitString(appIdTags, ":")[1])
+| filter isNotNull(${ID})`;
+  }
+  return undefined;
+}
+
+/** Builds the portfolio coverage query for this environment. */
+export function buildCoverageQuery(cfg: AppConfig): string {
+  const hoursActive = Math.max(1, Math.floor(cfg.windows.entityActivityHours ?? 2));
+  const parts: string[] = [];
+
+  parts.push(`${loadLookup(cfg)}
+| fields ${lookupProjection(cfg)}`);
+
+  // ---- HOSTS + monitoringMode (always on: it defines monitoringMode) ----
+  parts.push(`
 | lookup [
     fetch dt.entity.host
-    | filter lifetime[end] > now()-2h
-    ${APPID_FROM_TAGS}
+    | filter lifetime[end] > now()-${hoursActive}h
+    ${appIdFromTags(cfg)}
     | summarize { hasFullStack = countIf(monitoringMode == "FULL_STACK"),
                   hasInfra = countIf(monitoringMode == "INFRASTRUCTURE"),
                   Hosts = count(),
-                  FootPrint = sum(arraySize(runs[dt.entity.service])) }, by: {appID}
-  ], sourceField: appID, lookupField: appID, fields: {hasFullStack, hasInfra, Hosts, FootPrint}
+                  FootPrint = sum(arraySize(runs[dt.entity.service])) }, by: {${ID}}
+  ], sourceField: ${ID}, lookupField: ${ID}, fields: {hasFullStack, hasInfra, Hosts, FootPrint}
 | fieldsAdd monitoringMode = if(isNull(Hosts), "None",
                              else: if(hasFullStack > 0, "Full",
                                else: if(hasInfra > 0, "Infrastructure", else: "Other"))),
             Hosts = coalesce(Hosts, 0), FootPrint = coalesce(FootPrint, 0)
-| fieldsRemove hasFullStack, hasInfra
-// SERVICES (Traces)
+| fieldsRemove hasFullStack, hasInfra`);
+
+  // ---- SERVICES (Traces) ----
+  // Service count is also used for the Services column, so fetch it even when the Traces
+  // signal is off; only the Traces flag is conditional.
+  parts.push(`
 | lookup [
-    fetch dt.entity.service ${APPID_FROM_TAGS}
-    | summarize { Services = count() }, by: {appID}
-  ], sourceField: appID, lookupField: appID, fields: {Services}
-| fieldsAdd Services = coalesce(Services, 0), Traces = if(Services > 0, "Yes", else: "No")
-// METRICS (real ingestion: host cpu or service request reporting datapoints)
+    fetch dt.entity.service ${appIdFromTags(cfg)}
+    | summarize { Services = count() }, by: {${ID}}
+  ], sourceField: ${ID}, lookupField: ${ID}, fields: {Services}
+| fieldsAdd Services = coalesce(Services, 0)`);
+  if (cfg.signals.traces) {
+    parts.push(`| fieldsAdd Traces = if(Services > 0, "Yes", else: "No")`);
+  }
+
+  // ---- METRICS (real ingestion probe: host cpu or service request datapoints) ----
+  if (cfg.signals.metrics) {
+    parts.push(`
 | lookup [
-    timeseries cpu = avg(dt.host.cpu.usage), by:{dt.entity.host}, from: now()-2h
+    timeseries cpu = avg(dt.host.cpu.usage), by:{dt.entity.host}, from: now()-${hoursActive}h
     | filter isNotNull(arrayLast(arrayRemoveNulls(cpu))) | fields id = dt.entity.host
-    | lookup [ fetch dt.entity.host ${APPID_FROM_TAGS} | fields id, appID | dedup id ], sourceField: id, lookupField: id, fields: {appID}
-    | filter isNotNull(appID)
+    | lookup [ fetch dt.entity.host ${appIdFromTags(cfg)} | fields id, ${ID} | dedup id ],
+        sourceField: id, lookupField: id, fields: {${ID}}
+    | filter isNotNull(${ID})
     | append [
-        timeseries req = sum(dt.service.request.count), by:{dt.entity.service}, from: now()-2h
+        timeseries req = sum(dt.service.request.count), by:{dt.entity.service}, from: now()-${hoursActive}h
         | filter isNotNull(arrayLast(arrayRemoveNulls(req))) | fields id = dt.entity.service
-        | lookup [ fetch dt.entity.service ${APPID_FROM_TAGS} | fields id, appID | dedup id ], sourceField: id, lookupField: id, fields: {appID}
-        | filter isNotNull(appID) ]
-    | fieldsAdd appID = trim(appID)
-    | summarize { metricEntities = count() }, by: {appID}
-  ], sourceField: appID, lookupField: appID, fields: {metricEntities}
+        | lookup [ fetch dt.entity.service ${appIdFromTags(cfg)} | fields id, ${ID} | dedup id ],
+            sourceField: id, lookupField: id, fields: {${ID}}
+        | filter isNotNull(${ID}) ]
+    | summarize { metricEntities = count() }, by: {${ID}}
+  ], sourceField: ${ID}, lookupField: ${ID}, fields: {metricEntities}
 | fieldsAdd Metrics = if(isNotNull(metricEntities) AND metricEntities > 0, "Yes", else: "No")
-| fieldsRemove metricEntities
-// NB: the Logs signal is intentionally NOT computed here. Log presence requires a ~0.27 GB
-// sampled scan (there is no index on the AppID log field). Running it inline made the whole
-// portfolio query wait on it. It is now a separate query (LOG_PRESENCE_QUERY) that runs in
-// PARALLEL and is merged in usePortfolio, so the coverage query returns as soon as the
-// (0 GB) entity work is done.
-// RUM + SYNTHETIC (entity-name "<appID> - ..." convention)
+| fieldsRemove metricEntities`);
+  }
+
+  // ---- RUM + SYNTHETIC ----
+  const rumExtract = rumIdExtraction(cfg);
+  if ((cfg.signals.rum || cfg.signals.synthetic) && rumExtract) {
+    const wantSynth = cfg.signals.synthetic && cfg.synthetic.mode === "viaRum";
+    parts.push(`
 | lookup [
-    fetch dt.entity.mobile_application | parse \`entity.name\`, """LD:appID, "-""""
-    | filter isNotNull(appID) | fieldsAdd hasSynthetic = false
-    | append [ fetch dt.entity.application | parse \`entity.name\`, """LD:appID, "-""""
-               | filter isNotNull(appID)
+    fetch dt.entity.mobile_application
+    ${rumExtract}
+    | fieldsAdd hasSynthetic = false
+    | append [ fetch dt.entity.application
+               ${rumExtract}
                | fieldsAdd hasSynthetic = (arraySize(monitored_by[dt.entity.synthetic_test]) > 0) ]
-    | fieldsAdd appID = trim(appID)
-    | summarize { rumApps = count(), synthApps = countIf(hasSynthetic == true) }, by: {appID}
-  ], sourceField: appID, lookupField: appID, fields: {rumApps, synthApps}
-| fieldsAdd RUM = if(isNotNull(rumApps) AND rumApps > 0, "Yes", else: "No"),
-            Synthetic = if(isNotNull(synthApps) AND synthApps > 0, "Yes", else: "No")
-| fieldsRemove rumApps, synthApps
-// Monitored here excludes Logs (merged in client-side once LOG_PRESENCE_QUERY resolves).
-| fieldsAdd Monitored = if(monitoringMode != "None" OR Traces == "Yes"
-                          OR RUM == "Yes" OR Synthetic == "Yes" OR Metrics == "Yes", "Yes", else: "No")
+    | summarize { rumApps = count(), synthApps = countIf(hasSynthetic == true) }, by: {${ID}}
+  ], sourceField: ${ID}, lookupField: ${ID}, fields: {rumApps, synthApps}`);
+    if (cfg.signals.rum) {
+      parts.push(`| fieldsAdd RUM = if(isNotNull(rumApps) AND rumApps > 0, "Yes", else: "No")`);
+    }
+    if (wantSynth) {
+      parts.push(`| fieldsAdd Synthetic = if(isNotNull(synthApps) AND synthApps > 0, "Yes", else: "No")`);
+    }
+    parts.push(`| fieldsRemove rumApps, synthApps`);
+  }
+
+  // ---- Monitored: OR across the ENABLED signals only ----
+  const monitored: string[] = [`monitoringMode != "None"`];
+  if (cfg.signals.traces) monitored.push(`Traces == "Yes"`);
+  if (cfg.signals.metrics) monitored.push(`Metrics == "Yes"`);
+  if (cfg.signals.rum && rumExtract) monitored.push(`RUM == "Yes"`);
+  if (cfg.signals.synthetic && rumExtract && cfg.synthetic.mode === "viaRum")
+    monitored.push(`Synthetic == "Yes"`);
+  // NB: Logs is merged client-side (parallel query), so it is deliberately not here.
+  parts.push(`
+| fieldsAdd Monitored = if(${monitored.join(" OR ")}, "Yes", else: "No")
 | sort Hosts desc
-| limit 5000
-`;
+| limit 5000`);
+
+  return parts.join("\n");
+}
 
 /**
- * Log presence per application (sampled 1:1000). Run in parallel with COVERAGE_QUERY and
- * merged in usePortfolio; see the note in COVERAGE_QUERY for why it is separate.
+ * Log presence per application. Runs in PARALLEL with the coverage query and is merged in
+ * usePortfolio — a full log scan is the single most expensive part of the portfolio view.
  */
-export const LOG_PRESENCE_QUERY = `
-fetch logs, samplingRatio: 1000, from: now()-2h
-| filter isNotNull(AppID)
-| fieldsAdd appID = trim(toString(AppID))
-| summarize logs = count(), by: {appID}
-| fields appID
-`;
-
-export interface LogPresenceRow {
-  appID: string;
+export function buildLogPresenceQuery(cfg: AppConfig): string {
+  const hours = Math.max(1, Math.floor(cfg.logs.lookbackHours ?? 2));
+  const ratio = Math.max(1, Math.floor(cfg.logs.samplingRatio ?? 1000));
+  const field = dqlField(cfg.logs.field);
+  const sampling = ratio > 1 ? `, samplingRatio: ${ratio}` : "";
+  return `
+fetch logs${sampling}, from: now()-${hours}h
+| filter isNotNull(${field})
+| fieldsAdd ${ID} = trim(toString(${field}))
+| summarize logs = count(), by: {${ID}}
+| fields ${ID}`;
 }
 
 export type YesNo = "Yes" | "No";
 export type MonitoringMode = "Full" | "Infrastructure" | "Other" | "None";
 
-export interface CoverageRow {
+/**
+ * A portfolio row: a stable core plus whatever extra lookup columns the environment
+ * configured (accessed by their raw column name).
+ */
+export type CoverageRow = {
+  /** Stable internal alias of the configured key field. */
   appID: string;
+  /** Stable internal alias of the configured name field. */
   appName: string;
-  biaIndex: string;
-  buOwnerName: string;
-  itApplicationOwner: string;
-  itPortfolioOwnerName: string;
-  supportRemedyGroup: string;
-  revenueGenerating: string;
-  businessUnit: string;
-  hostingEnvironment: string;
-  applicationType: string;
   Hosts: number;
   FootPrint: number;
   Services: number;
   monitoringMode: MonitoringMode;
-  Metrics: YesNo;
-  Traces: YesNo;
-  /** Undefined while the parallel log-presence query is still loading (renders as "—"). */
+  Metrics?: YesNo;
+  Traces?: YesNo;
+  /** Undefined while the parallel log query is still loading (renders as "—"). */
   Logs?: YesNo;
-  RUM: YesNo;
-  Synthetic: YesNo;
+  RUM?: YesNo;
+  Synthetic?: YesNo;
   Monitored: YesNo;
-}
+} & Record<string, unknown>;
 
-/** The five observability signals tracked per application. */
-export const SIGNALS = ["Metrics", "Traces", "Logs", "RUM", "Synthetic"] as const;
-export type Signal = (typeof SIGNALS)[number];
+export interface LogPresenceRow {
+  appID: string;
+}

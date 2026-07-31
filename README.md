@@ -1,6 +1,6 @@
 # Observability Coverage
 
-A Dynatrace App (AppEngine) that gives a **portfolio-wide view of which applications
+A Dynatrace App that gives a **portfolio-wide view of which applications
 Dynatrace is monitoring** — and where the gaps are. It joins your application-portfolio
 lookup table to live telemetry (hosts, services, process groups, logs, metrics, RUM,
 synthetic) and reports, per application: monitoring mode, which signals are flowing, and
